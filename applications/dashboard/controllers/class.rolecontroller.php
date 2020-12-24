@@ -1,260 +1,368 @@
-<?php if (!defined('APPLICATION')) exit();
-/*
-Copyright 2008, 2009 Vanilla Forums Inc.
-This file is part of Garden.
-Garden is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-Garden is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
-You should have received a copy of the GNU General Public License along with Garden.  If not, see <http://www.gnu.org/licenses/>.
-Contact Vanilla Forums Inc. at support [at] vanillaforums [dot] com
-*/
-/**
- * Role Controller
- *
- * @package Dashboard
- */
- 
+<?php
 /**
  * RBAC (Role Based Access Control) system.
  *
- * @since 2.0.0
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
  * @package Dashboard
+ * @since 2.0
+ */
+
+use Vanilla\Permissions;
+
+/**
+ * Handles /role endpoint.
  */
 class RoleController extends DashboardController {
-   /** @var array Models to automatically instantiate. */
-   public $Uses = array('Database', 'Form', 'RoleModel');
-   
-   /**
-    * Set menu path. Automatically run on every use.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function Initialize() {
-      parent::Initialize();
-      Gdn_Theme::Section('Dashboard');
-      if ($this->Menu)
-         $this->Menu->HighlightRoute('/dashboard/settings');
-   }
-   
-   /**
-    * Create new role.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function Add() {
-		if(!$this->_Permission())
-			return;
 
-      $this->Title(T('Add Role'));
+    /** @var bool Should categories be hidden when editing a role? */
+    private $hideCategoryPermissions;
 
-      // Use the edit form with no roleid specified.
-      $this->View = 'Edit';
-      $this->Edit();
-   }
-   
-   /**
-    * Remove a role.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function Delete($RoleID = FALSE) {
-		if(!$this->_Permission())
-			return;
+    /** @var Gdn_Form */
+    public $Form;
 
-		$this->Title(T('Delete Role'));
-      $this->AddSideMenu('dashboard/role');
-      
-      $Role = $this->RoleModel->GetByRoleID($RoleID);
-      if ($Role->Deletable == '0')
-         $this->Form->AddError('You cannot delete this role.');
-      
-      // Make sure the form knows which item we are deleting.
-      $this->Form->AddHidden('RoleID', $RoleID);
-      
-      // Figure out how many users will be affected by this deletion
-      $this->AffectedUsers = $this->RoleModel->GetUserCount($RoleID);
-      
-      // Figure out how many users will be orphaned by this deletion
-      $this->OrphanedUsers = $this->RoleModel->GetUserCount($RoleID, TRUE);
+    /** @var array Models to automatically instantiate. */
+    public $Uses = ['Database', 'Form', 'RoleModel'];
 
-      // Get a list of roles other than this one that can act as a replacement
-      $this->ReplacementRoles = $this->RoleModel->GetByNotRoleID($RoleID);
-      
-      if ($this->Form->AuthenticatedPostBack()) {
-         // Make sure that a replacement role has been selected if there were going to be orphaned users
-         if ($this->OrphanedUsers > 0) {
-            $Validation = new Gdn_Validation();
-            $Validation->ApplyRule('ReplacementRoleID', 'Required', 'You must choose a replacement role for orphaned users.');
-            $Validation->Validate($this->Form->FormValues());
-            $this->Form->SetValidationResults($Validation->Results());
-         }
-         if ($this->Form->ErrorCount() == 0) {
-            // Go ahead and delete the Role
-            $this->RoleModel->Delete($RoleID, $this->Form->GetValue('ReplacementRoleID'));
-            $this->RedirectUrl = Url('dashboard/role');
-            $this->InformMessage(T('Deleting role...'));
-         }
-      }
-      $this->Render();
-   }
-   
-   /**
-    * Manage default role assignments.
-    *
-    * @since 2.0.?
-    * @access public
-    */
-   public function DefaultRoles() {
-      $this->Permission('Garden.Settings.Manage');
-      $this->AddSideMenu('');
+    /** @var RoleModel */
+    public $RoleModel;
 
-      $this->Title(T('Default Roles'));
+    /**
+     * RoleController constructor.
+     */
+    public function __construct() {
+        parent::__construct();
+        $this->hideCategoryPermissions = c('Vanilla.HideRoleCategoryPermissions', false);
+    }
 
-      // Load roles for dropdowns.
-      $RoleModel = new RoleModel();
-      $this->SetData('RoleData', $RoleModel->Get());
+    /**
+     * Set menu path. Automatically run on every use.
+     *
+     * @since 2.0.0
+     * @access public
+     */
+    public function initialize() {
+        parent::initialize();
+        Gdn_Theme::section('Dashboard');
+        if ($this->Menu) {
+            $this->Menu->highlightRoute('/dashboard/settings');
+        }
+    }
 
-      if ($this->Form->AuthenticatedPostBack() === FALSE) {
-         // Get a list of default member roles from the config.
-         $DefaultRoles = C('Garden.Registration.DefaultRoles');
-         $this->Form->SetValue('DefaultRoles', $DefaultRoles);
+    /**
+     * Create new role.
+     *
+     * @since 2.0.0
+     * @access public
+     */
+    public function add() {
+        if (!$this->_permission()) {
+            return;
+        }
 
-         // Get the guest roles.
-         $GuestRolesData = $RoleModel->GetByUserID(0);
-         $GuestRoles = ConsolidateArrayValuesByKey($GuestRolesData, 'RoleID');
-         $this->Form->SetValue('GuestRoles', $GuestRoles);
+        $this->title(t('Add Role'));
 
-         // The applicant role.
-         $ApplicantRoleID = C('Garden.Registration.ApplicantRoleID', '');
-         $this->Form->SetValue('ApplicantRoleID', $ApplicantRoleID);
-      } else {
-         $DefaultRoles = $this->Form->GetFormValue('DefaultRoles');
-         $ApplicantRoleID = $this->Form->GetFormValue('ApplicantRoleID');
-         SaveToConfig(array(
-            'Garden.Registration.DefaultRoles' => $DefaultRoles,
-            'Garden.Registration.ApplicantRoleID' => $ApplicantRoleID));
+        // Use the edit form with no roleid specified.
+        $this->View = 'Edit';
+        $this->edit();
+    }
 
-         $GuestRoles = $this->Form->GetFormValue('GuestRoles');
-         $UserModel = new UserModel();
-         $UserModel->SaveRoles(0, $GuestRoles, FALSE);
+    /**
+     * Remove a role.
+     *
+     * @since 2.0.0
+     * @access public
+     */
+    public function delete($roleID = false) {
+        if (!$this->_permission($roleID)) {
+            return;
+        }
 
-         $this->InformMessage(T("Saved"));
-      }
+        $this->title(t('Delete Role'));
+        $this->setHighlightRoute('dashboard/role');
 
-      $this->Render();
-   }
-   
-   /**
-    * Show a warning if default roles are not setup yet.
-    *
-    * @since 2.0.?
-    * @access public
-    */
-   public function DefaultRolesWarning() {
-      // Check to see if there are no default roles for guests or members.
-      $DefaultRolesWarning = FALSE;
-      $DefaultRoles = C('Garden.Registration.DefaultRoles');
-      if (!is_array($DefaultRoles) || count($DefaultRoles) == 0) {
-         $DefaultRolesWarning = TRUE;
-      } elseif (!C('Garden.Registration.ApplicantRoleID') && C('Garden.Registration.Method') == 'Approval') {
-         $DefaultRolesWarning = TRUE;
-      } else {
-         $RoleModel = new RoleModel();
-         $GuestRoles = $RoleModel->GetByUserID(0);
-         if($GuestRoles->NumRows() == 0)
-            $DefaultRolesWarning = TRUE;
-      }
+        $role = $this->RoleModel->getByRoleID($roleID);
+        if ($role->Deletable == '0') {
+            $this->Form->addError('You cannot delete this role.');
+        }
 
-      if ($DefaultRolesWarning) {
-         echo '<div class="Messages Errors"><ul><li>',
-            sprintf(T('No default roles.', 'You don\'t have your default roles set up. To correct this problem click %s.'),
-            Anchor(T('here'), 'dashboard/role/defaultroles')),
-            '</div>';
-      }
-   }
-   
-   /**
-    * Edit a role.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function Edit($RoleID = FALSE) {
-		if(!$this->_Permission())
-			return;
+        // Make sure the form knows which item we are deleting.
+        $this->Form->addHidden('RoleID', $roleID);
 
-      if ($this->Head && $this->Head->Title() == '')
-         $this->Head->Title(T('Edit Role'));
-         
-      $this->AddSideMenu('dashboard/role');
-      $PermissionModel = Gdn::PermissionModel();
-      $this->Role = $this->RoleModel->GetByRoleID($RoleID);
-      // $this->EditablePermissions = is_object($this->Role) ? $this->Role->EditablePermissions : '1';
-      $this->AddJsFile('jquery.gardencheckboxgrid.js');
-      
-      // Set the model on the form.
-      $this->Form->SetModel($this->RoleModel);
-      
-      // Make sure the form knows which item we are editing.
-      $this->Form->AddHidden('RoleID', $RoleID);
-      
-      $LimitToSuffix = !$this->Role || $this->Role->CanSession == '1' ? '' : 'View';
-      
-      // If seeing the form for the first time...
-      if ($this->Form->AuthenticatedPostBack() === FALSE) {
-         // Get the role data for the requested $RoleID and put it into the form.
-         $this->SetData('PermissionData', $PermissionModel->GetPermissionsEdit($RoleID ? $RoleID : 0, $LimitToSuffix), true);
-            
-         $this->Form->SetData($this->Role);
-      } else {
-         // If the form has been posted back...
-         // 2. Save the data (validation occurs within):
-         if ($RoleID = $this->Form->Save()) {
-            $this->InformMessage(T('Your changes have been saved.'));
-            $this->RedirectUrl = Url('dashboard/role');
+        // Figure out how many users will be affected by this deletion
+        $this->AffectedUsers = $this->RoleModel->getUserCount($roleID);
+
+        // Figure out how many users will be orphaned by this deletion
+        $this->OrphanedUsers = $this->RoleModel->getUserCount($roleID, true);
+
+        // Get a list of roles other than this one that can act as a replacement
+        $this->ReplacementRoles = $this->RoleModel->getByNotRoleID($roleID);
+
+        if ($this->Form->authenticatedPostBack()) {
+            // Make sure that a replacement role has been selected if there were going to be orphaned users
+            if ($this->OrphanedUsers > 0) {
+                $validation = new Gdn_Validation();
+                $validation->applyRule('ReplacementRoleID', 'Required', 'You must choose a replacement role for orphaned users.');
+                $validation->validate($this->Form->formValues());
+                $this->Form->setValidationResults($validation->results());
+            }
+            if ($this->Form->errorCount() == 0) {
+                // Go ahead and delete the Role
+                $this->RoleModel->deleteAndReplace($roleID, $this->Form->getValue('ReplacementRoleID'));
+                $this->setRedirectTo('dashboard/role');
+                $this->informMessage(t('Deleting role...'));
+            }
+        }
+        $this->render();
+    }
+
+    /**
+     * Edit a role.
+     *
+     * @param int|bool $RoleID
+     * @since 2.0.0
+     * @access public
+     */
+    public function edit($roleID = false) {
+        if (!$this->_permission($roleID)) {
+            return;
+        }
+
+        if ($this->title() == '') {
+            $this->title(t('Edit Role'));
+        }
+
+        $this->setHighlightRoute('dashboard/role');
+        $permissionModel = Gdn::permissionModel();
+        $roleSync = !empty(c('Garden.SSO.'.UserModel::OPT_ROLE_SYNC));
+        $this->Role = $this->RoleModel->getByRoleID($roleID);
+        // $this->EditablePermissions = is_object($this->Role) ? $this->Role->EditablePermissions : '1';
+        $this->addJsFile('jquery.gardencheckboxgrid.js');
+
+        // Set the model on the form.
+        $this->Form->setModel($this->RoleModel);
+
+        // Make sure the form knows which item we are editing.
+        $this->Form->addHidden('RoleID', $roleID);
+
+        $limitToSuffix = !$this->Role || $this->Role->CanSession == '1' ? '' : 'View';
+
+        // If seeing the form for the first time...
+        if ($this->Form->authenticatedPostBack() === false) {
+            // Get the role data for the requested $RoleID and put it into the form.
+            $permissions = $permissionModel->getPermissionsEdit(
+                $roleID ? $roleID : 0,
+                $limitToSuffix,
+                $this->hideCategoryPermissions === false
+            );
+
+            // Remove permissions the user doesn't have access to.
+            if (!Gdn::session()->checkPermission('Garden.Settings.Manage')) {
+                foreach ($this->RoleModel->RankPermissions as $permission) {
+                    if (Gdn::session()->checkPermission($permission)) {
+                        continue;
+                    }
+
+                    list($px, $sx) = explode('.', $permission, 2);
+                    unset($permissions['_'.$px][$sx]);
+                }
+            }
+
+            $this->setData('PermissionData', $permissions, true);
+
+            $this->Form->setData($this->Role);
+        } else {
+            $this->removeRankPermissions();
+            if (!$roleSync) {
+                $this->Form->removeFormValue('Sync');
+            } else {
+                $this->Form->setFormValue('Sync', (string)$this->Form->getFormValue('Sync'));
+            }
+
+            // Make sure the role's checkbox has a false value so that the role model can handle a sparse update of
+            // column from other places.
+            if (!$this->Form->getFormValue('PersonalInfo')) {
+                $this->Form->setFormValue('PersonalInfo', false);
+            }
+
+            if ($this->hideCategoryPermissions) {
+                $this->Form->setFormValue('IgnoreCategoryPermissions', true);
+            }
+
+            // If the form has been posted back...
+            // 2. Save the data (validation occurs within):
+            if ($roleID = $this->Form->save()) {
+                if ($this->deliveryType() === DELIVERY_TYPE_DATA) {
+                    $this->index($roleID);
+                    return;
+                }
+
+                $permissionData = $permissionModel->getPermissionsEdit(
+                    $roleID,
+                    $limitToSuffix,
+                    $this->hideCategoryPermissions === false
+                );
+
+                $this->informMessage(t('Your changes have been saved.'));
+                $this->setRedirectTo('dashboard/role');
+            } else {
+                $overrides = $this->Form->getFormValue('Permission');
+                $permissionData = $permissionModel->getPermissionsEdit(
+                    $roleID,
+                    $limitToSuffix,
+                    $this->hideCategoryPermissions === false,
+                    $overrides
+                );
+            }
             // Reload the permission data.
-            $this->SetData('PermissionData', $PermissionModel->GetPermissionsEdit($RoleID, $LimitToSuffix), true);
-         }
-      }
-      
-      $this->Render();
-   }
-   
-   /**
-    * Show list of roles.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function Index($RoleID = NULL) {
-		$this->Permission('Garden.Settings.Manage');
+            $this->setData('PermissionData', $permissionData, true);
+        }
 
-      $this->AddSideMenu('dashboard/role');
-      $this->AddJsFile('jquery.tablednd.js');
-      $this->AddJsFile('jquery-ui.js');
-      $this->Title(T('Roles & Permissions'));
-      
-      if (!$RoleID)
-         $RoleData = $this->RoleModel->Get()->ResultArray();
-      else {
-         $Role = $this->RoleModel->GetID($RoleID);
-         $RoleData = array($Role);
-      }
-      
-      $this->SetData('Roles', $RoleData);
-      $this->Render();
-   }
+        $this->setData('_Types', $this->RoleModel->getDefaultTypes(true));
+        $this->setData('_roleSyncVisible', $roleSync);
 
-   /**
-    * Do permission check.
-    *
-    * @since 2.0.0
-    * @access protected
-    */
-	protected function _Permission() {
-      $this->Permission('Garden.Settings.Manage');
-		return TRUE;
-	}
+        $this->render();
+    }
+
+    /**
+     * Show list of roles.
+     *
+     * @since 2.0.0
+     * @access public
+     */
+    public function index($roleID = null) {
+        $this->_permission();
+
+        $this->setHighlightRoute('dashboard/role');
+        $this->addJsFile('jquery.tablednd.js');
+        $this->title(t('Roles & Permissions'));
+
+        if (!$roleID) {
+            $roles = $this->RoleModel->getWithRankPermissions()->resultArray();
+
+            // Check to see which roles can be modified.
+            foreach ($roles as &$row) {
+                $canModify = true;
+
+                if (!Gdn::session()->checkPermission('Garden.Settings.Manage')) {
+                    foreach ($this->RoleModel->RankPermissions as $permission) {
+                        if ($row[$permission] && !Gdn::session()->checkPermission($permission)) {
+                            $canModify = false;
+                            break;
+                        }
+                    }
+                }
+                $row['CanModify'] = $canModify;
+            }
+            $this->setData('Roles', $roles);
+        } elseif ($this->deliveryType() === DELIVERY_TYPE_DATA) {
+            // This is an API request. Get the role in a nicer format.
+            $role = $this->RoleModel->getID($roleID, DATASET_TYPE_ARRAY);
+
+            // Get the global permissions.
+            $permissions = Gdn::permissionModel()->getGlobalPermissions($roleID);
+            unset($permissions['PermissionID']);
+
+            // Get the per-category permissions.
+            $permissions['Category'] = $this->RoleModel->getCategoryPermissions($roleID);
+
+            $role['Permissions'] = $permissions;
+
+            $this->setData('Role', $role);
+            saveToConfig('Api.Clean', false, false);
+        } else {
+            $Role = $this->RoleModel->getID($roleID);
+            $this->setData('Roles', [$Role]);
+        }
+
+        // Grab the total users for each role.
+        if (is_array($this->data('Roles'))) {
+            $pastThreshold = Gdn::userModel()->pastUserMegaThreshold();
+            $thresholdTypeExceptions = RoleModel::getDefaultTypes();
+            unset($thresholdTypeExceptions[RoleModel::TYPE_MEMBER]);
+
+            $roles = $this->data('Roles');
+            foreach ($roles as &$role) {
+                if ($pastThreshold && !in_array($role['Type'], $thresholdTypeExceptions)) {
+                    $countUsers = t('View');
+                } else {
+                    $countUsers = $this->RoleModel->getUserCount($role['RoleID']);
+                }
+
+                $role['CountUsers'] = $countUsers;
+            }
+            $this->setData('Roles', $roles);
+        }
+
+        $this->render();
+    }
+
+    /**
+     * Advanced settings for roles & permissions.
+     */
+    public function advanced() {
+        $this->permission('Garden.Settings.Manage');
+
+        $aliases = Permissions::getRankedPermissionAliases(true);
+        foreach ($aliases as $key => &$alias) {
+            $alias = t('permissions.'.$alias);
+        }
+
+        $cf = new ConfigurationModule($this);
+        $cf->initialize([
+            'Garden.PrivateCommunity' => [
+                'LabelCode' => 'Enable Private Communities',
+                'Description' => t('Once enabled, only members will see inside your community.'),
+                'Control' => 'toggle'
+            ],
+            'Garden.api.ssoIDPermission' => [
+                'LabelCode' => 'API SSO Expand Permission',
+                'Description' => t('Garden.api.ssoIDPermission.description'),
+                'Control' => 'DropDown',
+                'Items' => $aliases,
+                'Default' => Permissions::RANK_COMMUNITY_MANAGER,
+            ]
+        ]);
+        $this->setData('Title', t('Advanced Settings'));
+        $cf->renderAll();
+    }
+
+    /**
+     * Do permission check.
+     *
+     * @param int $roleID
+     * @since 2.0.0
+     * @access protected
+     */
+    protected function _permission($roleID = null) {
+        $this->permission(['Garden.Settings.Manage', 'Garden.Roles.Manage'], false);
+
+        if ($roleID && !checkPermission('Garden.Settings.Manage')) {
+            // Make sure the user can assign this role.
+            $assignable = $this->RoleModel->getAssignable();
+            if (!isset($assignable[$roleID])) {
+                throw permissionException('@'.t("You don't have permission to modify this role."));
+            }
+        }
+        return true;
+    }
+
+    /**
+     *
+     */
+    protected function removeRankPermissions() {
+        if (Gdn::session()->checkPermission('Garden.Settings.Manage')) {
+            return;
+        }
+
+        // Remove ranking permissions.
+        $permissions = $this->Form->getFormValue('Permission');
+        foreach ($this->RoleModel->RankPermissions as $permission) {
+            if (!Gdn::session()->checkPermission($permission) && in_array($permission, $permissions)) {
+                $index = array_search($permission, $permissions);
+                unset($permissions[$index]);
+            }
+        }
+        $this->Form->setFormValue('Permission', $permissions);
+    }
 }

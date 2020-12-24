@@ -1,7 +1,8 @@
 <!DOCTYPE html>
-<html>
+<html lang="{$CurrentLocale.Lang}">
 <head>
-	{asset name='Head'}
+    <meta charset="utf-8">
+    {asset name='Head'}
 </head>
 <body id="{$BodyID}" class="PopupPage {$BodyClass}">
 <div id="Content">{asset name='Content'}</div>

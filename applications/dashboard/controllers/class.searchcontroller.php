@@ -1,141 +1,101 @@
-<?php if (!defined('APPLICATION')) exit();
-/*
-Copyright 2008, 2009 Vanilla Forums Inc.
-This file is part of Garden.
-Garden is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-Garden is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
-You should have received a copy of the GNU General Public License along with Garden.  If not, see <http://www.gnu.org/licenses/>.
-Contact Vanilla Forums Inc. at support [at] vanillaforums [dot] com
-*/
-/**
- * Search Controller
- *
- * @package Dashboard
- */
- 
+<?php
 /**
  * Manages basic searching.
  *
- * @since 2.0.0
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
  * @package Dashboard
+ * @since 2.0
+ */
+
+use Vanilla\Search\LegacySearchAdapter;
+use Vanilla\Search\SearchResults;
+
+/**
+ * Handles /search endpoint.
  */
 class SearchController extends Gdn_Controller {
-   /** @var array Models to automatically instantiate. */
-   public $Uses = array('Database');
-   
-   // Object initialization
-   public $Form;
-   public $SearchModel;   
 
-   /**
-    * Object instantiation & form prep.
-    */
-	public function __construct() {
-		parent::__construct();
-   
-      // Object instantiation
-      $this->SearchModel = new SearchModel();
-		$Form = Gdn::Factory('Form');
-		
-		// Form prep
-		$Form->Method = 'get';
-		$Form->InputPrefix = '';
-		$this->Form = $Form;
-	}
-	
-	/**
-    * Add JS, CSS, modules. Automatically run on every use.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function Initialize() {
-      $this->Head = new HeadModule($this);
-      $this->AddJsFile('jquery.js');
-      $this->AddJsFile('jquery.livequery.js');
-      $this->AddJsFile('jquery.form.js');
-      $this->AddJsFile('jquery.popup.js');
-      $this->AddJsFile('jquery.gardenhandleajaxform.js');
-      $this->AddJsFile('jquery.expander.js');
-      $this->AddJsFile('global.js');
-      
-      $this->AddCssFile('style.css');
-      $this->AddCssFile('menu.css');
-      $this->AddModule('GuestModule');
-      parent::Initialize();
-      $this->SetData('Breadcrumbs', array(array('Name' => T('Search'), 'Url' => '/search')));
-   }
-	
-	/**
-    * Default search functionality.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param int $Page Page number.
-    */
-	public function Index($Page = '') {
-		$this->AddJsFile('search.js');
-		$this->Title(T('Search'));
-      
-      SaveToConfig('Garden.Format.EmbedSize', '160x90', FALSE);
-      Gdn_Theme::Section('SearchResults');
-      
-      list($Offset, $Limit) = OffsetLimit($Page, C('Garden.Search.PerPage', 20));
-      $this->SetData('_Limit', $Limit);
-		
-		$Search = $this->Form->GetFormValue('Search');
-      $Mode = $this->Form->GetFormValue('Mode');
-      if ($Mode)
-         $this->SearchModel->ForceSearchMode = $Mode;
-      try {
-         $ResultSet = $this->SearchModel->Search($Search, $Offset, $Limit);
-      } catch (Gdn_UserException $Ex) {
-         $this->Form->AddError($Ex);
-         $ResultSet = array();
-      } catch (Exception $Ex) {
-         LogException($Ex);
-         $this->Form->AddError($Ex);
-         $ResultSet = array();
-      }
-      Gdn::UserModel()->JoinUsers($ResultSet, array('UserID'));
-      
-      // Fix up the summaries.
-      $SearchTerms = explode(' ', Gdn_Format::Text($Search));
-      foreach ($ResultSet as &$Row) {
-         $Row['Summary'] = SearchExcerpt(Gdn_Format::PlainText($Row['Summary'], $Row['Format']), $SearchTerms);
-         $Row['Format'] = 'Html';
-      }
-      
-		$this->SetData('SearchResults', $ResultSet, TRUE);
-		$this->SetData('SearchTerm', Gdn_Format::Text($Search), TRUE);
-		if($ResultSet)
-			$NumResults = count($ResultSet);
-		else
-			$NumResults = 0;
-		if ($NumResults == $Offset + $Limit)
-			$NumResults++;
-		
-		// Build a pager
-		$PagerFactory = new Gdn_PagerFactory();
-		$this->Pager = $PagerFactory->GetPager('MorePager', $this);
-		$this->Pager->MoreCode = 'More Results';
-		$this->Pager->LessCode = 'Previous Results';
-		$this->Pager->ClientID = 'Pager';
-		$this->Pager->Configure(
-			$Offset,
-			$Limit,
-			$NumResults,
-			'dashboard/search/%1$s/%2$s/?Search='.Gdn_Format::Url($Search)
-		);
-		
-//		if ($this->_DeliveryType != DELIVERY_TYPE_ALL) {
-//         $this->SetJson('LessRow', $this->Pager->ToString('less'));
-//         $this->SetJson('MoreRow', $this->Pager->ToString('more'));
-//         $this->View = 'results';
-//      }
-		
-      $this->CanonicalUrl(Url('search', TRUE));
+    /** @var array Models to automatically instantiate. */
+    public $Uses = ['Database'];
 
-		$this->Render();
-	}
+    /**  @var Gdn_Form */
+    public $Form;
+
+    /** @var LegacySearchAdapter */
+    private $searchAdapter;
+
+    /**
+     * Object instantiation & form prep.
+     *
+     * @param LegacySearchAdapter $searchAdapter
+     */
+    public function __construct(LegacySearchAdapter $searchAdapter) {
+        parent::__construct();
+        $this->searchAdapter = $searchAdapter;
+        $form = Gdn::factory('Form');
+
+        // Form prep
+        $form->Method = 'get';
+        $this->Form = $form;
+    }
+
+    /**
+     * Add JS, CSS, modules. Automatically run on every use.
+     *
+     * @since 2.0.0
+     * @access public
+     */
+    public function initialize() {
+        $this->Head = new HeadModule($this);
+        $this->addJsFile('jquery.js');
+        $this->addJsFile('jquery.form.js');
+        $this->addJsFile('jquery.popup.js');
+        $this->addJsFile('jquery.gardenhandleajaxform.js');
+        $this->addJsFile('jquery.expander.js');
+        $this->addJsFile('global.js');
+
+        $this->addCssFile('style.css');
+        $this->addCssFile('vanillicon.css', 'static');
+        $this->addModule('GuestModule');
+        parent::initialize();
+        $this->setData('Breadcrumbs', [['Name' => t('Search'), 'Url' => '/search']]);
+    }
+
+    /**
+     * Default search functionality.
+     *
+     * @param string $search The search string.
+     * @param string $page Page number.
+     */
+    public function index($search = '', $page = '') {
+        $this->addJsFile('search.js');
+        $this->title(t('Search'));
+
+        saveToConfig('Garden.Format.EmbedSize', '160x90', false);
+        Gdn_Theme::section('SearchResults');
+
+        [$offset, $limit] = offsetLimit($page, c('Garden.Search.PerPage', 20));
+        $this->setData('_Limit', $limit);
+
+        try {
+            $results = $this->searchAdapter->search(['search' => $search], $offset, $limit);
+        } catch (Gdn_UserException $ex) {
+            $this->Form->addError($ex);
+            $results = new SearchResults([], 0, $offset, $limit);
+        } catch (Exception $ex) {
+            logException($ex);
+            $this->Form->addError($ex);
+            $results = new SearchResults([], 0, $offset, $limit);
+        }
+
+        $legacyResults = $results->asLegacyResults();
+        $this->setData('SearchResults', $results->asLegacyResults(), true);
+        $this->setData('SearchTerm', Gdn_Format::text($search), true);
+
+        $this->setData('_CurrentRecords', count($legacyResults));
+
+        $this->canonicalUrl(url('search', true));
+        $this->render();
+    }
 }

@@ -1,52 +1,84 @@
-<?php if (!defined('APPLICATION')) exit();
-/*
-Copyright 2008, 2009 Vanilla Forums Inc.
-This file is part of Garden.
-Garden is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-Garden is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
-You should have received a copy of the GNU General Public License along with Garden.  If not, see <http://www.gnu.org/licenses/>.
-Contact Vanilla Forums Inc. at support [at] vanillaforums [dot] com
-*/
+<?php
+/**
+ * Regarding model.
+ *
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
+ * @package Dashboard
+ * @since 2.0
+ */
 
+/**
+ * Handles regarding data.
+ */
 class RegardingModel extends Gdn_Model {
-   
-   /**
-    * Class constructor. Defines the related database table name.
-    */
-   public function __construct() {
-      parent::__construct('Regarding');
-   }
-   
-   public function GetID($RegardingID) {
-      $Regarding = $this->GetWhere(array('RegardingID' => $RegardingID))->FirstRow();
-      return $Regarding;
-   }
-   
-   public function Get($ForeignType, $ForeignID) {
-      return $this->GetWhere(array(
-         'ForeignType'  => $ForeignType,
-         'ForeignID'    => $ForeignID
-      ))->FirstRow(DATASET_TYPE_ARRAY);
-   }
-   
-   public function GetRelated($Type, $ForeignType, $ForeignID) {
-      return $this->GetWhere(array(
-         'Type'         => $Type,
-         'ForeignType'  => $ForeignType,
-         'ForeignID'    => $ForeignID
-      ))->FirstRow(DATASET_TYPE_ARRAY);
-   }
-   
-   public function GetAll($ForeignType, $ForeignIDs = array()) {
-      if (count($ForeignIDs) == 0) {
-         return new Gdn_DataSet(array());
-      }
-      
-      return Gdn::SQL()->Select('*')
-         ->From('Regarding')
-         ->Where('ForeignType', $ForeignType)
-         ->WhereIn('ForeignID', $ForeignIDs)
-         ->Get();
-   }
-   
+
+    /**
+     * Class constructor. Defines the related database table name.
+     */
+    public function __construct() {
+        parent::__construct('Regarding');
+    }
+
+    /**
+     * Get a single record by ID.
+     *
+     * @param mixed $regardingID
+     * @param string|false $datasetType
+     * @param array $options
+     * @return array|bool|stdClass
+     */
+    public function getID($regardingID, $datasetType = false, $options = []) {
+        $regarding = $this->getWhere(['RegardingID' => $regardingID])->firstRow();
+        return $regarding;
+    }
+
+    /**
+     * Get everything for the foreign ID.
+     *
+     * @param string $foreignType
+     * @param string $foreignID
+     * @return array|bool|stdClass
+     */
+    public function get($foreignType, $foreignID) {
+        return $this->getWhere([
+            'ForeignType' => $foreignType,
+            'ForeignID' => $foreignID
+        ])->firstRow(DATASET_TYPE_ARRAY);
+    }
+
+    /**
+     *
+     *
+     * @param $type
+     * @param $foreignType
+     * @param $foreignID
+     * @return array|bool|stdClass
+     */
+    public function getRelated($type, $foreignType, $foreignID) {
+        return $this->getWhere([
+            'Type' => $type,
+            'ForeignType' => $foreignType,
+            'ForeignID' => $foreignID
+        ])->firstRow(DATASET_TYPE_ARRAY);
+    }
+
+    /**
+     *
+     *
+     * @param $foreignType
+     * @param array $foreignIDs
+     * @return Gdn_DataSet
+     */
+    public function getAll($foreignType, $foreignIDs = []) {
+        if (count($foreignIDs) == 0) {
+            return new Gdn_DataSet([]);
+        }
+
+        return Gdn::sql()->select('*')
+            ->from('Regarding')
+            ->where('ForeignType', $foreignType)
+            ->whereIn('ForeignID', $foreignIDs)
+            ->get();
+    }
 }

@@ -1,33 +1,39 @@
-<?php if (!defined('APPLICATION')) exit();
-
+<?php
 /**
- * Garden.Modules
+ * Drafts module
+ *
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
+ * @package Vanilla
+ * @since 2.0
  */
 
 /**
- * Renders user drafts. If rendered within a discussion, it only shows drafts
- * related to that discussion.
+ * Renders user drafts. If rendered within a discussion, it only shows drafts related to that discussion.
  */
 class DraftsModule extends Gdn_Module {
-   
-   public $Form;
-   public function GetData($Limit = 20, $DiscussionID = '') {
-      $Session = Gdn::Session();
-      if ($Session->IsValid()) {
-         $DraftModel = new DraftModel();
-         $this->Data = $DraftModel->Get($Session->UserID, 0, $Limit, $DiscussionID);
-      }
-      $this->Form = $this->_Sender->Form;
-   }
 
-   public function AssetTarget() {
-      return 'Panel';
-   }
+    /** @var  Gdn_Form */
+    public $Form;
 
-   public function ToString() {
-      if (is_object($this->Data) && $this->Data->NumRows() > 0)
-         return parent::ToString();
+    public function getData($limit = 20, $discussionID = '') {
+        $session = Gdn::session();
+        if ($session->isValid()) {
+            $draftModel = new DraftModel();
+            $this->Data = $draftModel->getByUser($session->UserID, 0, $limit, $discussionID);
+        }
+        $this->Form = $this->_Sender->Form;
+    }
 
-      return '';
-   }
+    public function assetTarget() {
+        return 'Panel';
+    }
+
+    public function toString() {
+        if (is_object($this->Data) && $this->Data->numRows() > 0) {
+            return parent::toString();
+        }
+
+        return '';
+    }
 }

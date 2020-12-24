@@ -1,835 +1,816 @@
-<?php if (!defined('APPLICATION')) exit();
-/*
-Copyright 2008, 2009 Vanilla Forums Inc.
-This file is part of Garden.
-Garden is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-Garden is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
-You should have received a copy of the GNU General Public License along with Garden.  If not, see <http://www.gnu.org/licenses/>.
-Contact Vanilla Forums Inc. at support [at] vanillaforums [dot] com
-*/
+<?php
+/**
+ * Update model.
+ *
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
+ * @package Dashboard
+ * @since 2.0
+ */
+use Vanilla\Addon;
 
-define('ADDON_TYPE_PLUGIN', 1);
-define('ADDON_TYPE_THEME', 2);
-define('ADDON_TYPE_LOCALE', 4);
-define('ADDON_TYPE_APPLICATION',  5);
-define('ADDON_TYPE_CORE', 10);
-
+/**
+ * Handles updating.
+ */
 class UpdateModel extends Gdn_Model {
-   public $AddonSiteUrl = 'http://vanilla.local';
+    const STATUS_RUNNING = 'running';
+    const STATUS_SUCCESS = 'success';
+    const STATUS_ERROR = 'error';
 
-   protected static function _AddAddon($Addon, &$Addons) {
-      $Slug = strtolower($Addon['AddonKey']).'-'.strtolower($Addon['AddonType']);
-      $Addons[$Slug] = $Addon;
-   }
+    // TODO Remove when removing other deprecated functions!
+    /** @var string URL to the addons site. */
+    public $AddonSiteUrl = 'http://vanilla.local';
 
-   /**
-    * Check an addon's file to extract the addon information out of it.
-    *
-    * @param string $Path The path to the file.
-    * @param bool $Fix Whether or not to fix files that have been zipped incorrectly.
-    * @return array An array of addon information.
-    */
-   public static function AnalyzeAddon($Path, $ThrowError = TRUE) {
-      if (!file_exists($Path)) {
-         if ($ThrowError)
-            throw new Exception("$Path not found.", 404);
-         return FALSE;
-      }
-      
-      $Result = array();
+    /**
+     * @var bool
+     */
+    private $runAsSystem;
 
-      $InfoPaths = array(
-          '/settings/about.php', // application
-          '/default.php', // plugin
-          '/class.*.plugin.php', // plugin
-          '/about.php', // theme
-          '/definitions.php', // locale
-          '/index.php', // vanilla core
-          'vanilla2export.php' // porter
-          );
+    /**
+     * Find a list of filenames in a folder or zip.
+     *
+     * @param string $path Folder or zip file to look in.
+     * @param array $fileNames List of files to attempt to locate inside $path.
+     * @return array
+     * @throws Exception
+     * @throws Gdn_UserException
+     * @deprecated since 2.3
+     */
+    public static function findFiles($path, $fileNames) {
+        deprecated(__CLASS__.'->'.__METHOD__.'()');
+        // Get the list of potential files to analyze.
+        if (is_dir($path)) {
+            $entries = self::getInfoFiles($path, $fileNames);
+        } else {
+            $entries = self::getInfoZip($path, $fileNames);
+        }
 
-      // Get the list of potential files to analyze.
-      if (is_dir($Path)) {
-         $Entries = self::_GetInfoFiles($Path, $InfoPaths);
-      } else {
-         $Entries = self::_GetInfoZip($Path, $InfoPaths, FALSE, $ThrowError);
-         $DeleteEntries = TRUE;
-      }
+        return $entries;
+    }
 
-      foreach ($Entries as $Entry) {
-         if ($Entry['Name'] == '/index.php') {
-            // This could be the core vanilla package.
-            $Version = self::ParseCoreVersion($Entry['Path']);
+    /**
+     * Coerces an addon.json into something we can check in the update model.
+     *
+     * @param $path The path to the addon directory
+     * @return array The addon info array
+     */
+    private static function addonJsonConverter($path) {
 
-            if (!$Version)
-               continue;
+        $addon = new Vanilla\Addon($path);
+        $addonInfo = Gdn_PluginManager::calcOldInfoArray($addon);
+        $slug = trim(substr($path, strrpos($path, '/') + 1));
 
-            // The application was confirmed.
-            $Addon = array(
-                'AddonKey' => 'vanilla',
-                'AddonTypeID' => ADDON_TYPE_CORE,
-                'Name' => 'Vanilla',
-                'Description' => 'Vanilla is an open-source, standards-compliant, multi-lingual, fully extensible discussion forum for the web. Anyone who has web-space that meets the requirements can download and use Vanilla for free!',
-                'Version' => $Version,
-                'Path' => $Entry['Path']);
-            break;
-         } elseif ($Entry['Name'] == 'vanilla2export.php') {
-            // This could be the vanilla porter.
-            $Version = self::ParseCoreVersion($Entry['Path']);
+        $validTypes = ['application', 'plugin', 'theme', 'locale'];
 
-            if (!$Version)
-               continue;
+        // If the type is theme or locale then use that.
+        $type = val('Type', $addonInfo, 'addon');
 
-            $Addon = array(
-                'AddonKey' => 'porter',
-                'AddonTypeID' => ADDON_TYPE_CORE,
-                'Name' => 'Vanilla Porter',
-                'Description' => 'Drop this script on your existing site and go to it to export your existing forum data to the Vanilla 2 import format. If you want more information on how to use this application go <a href="http://vanillaforums.com/blog/help-topics/importing-data">here</a>.',
-                'Version' => $Version,
-                'Path' => $Entry['Path']);
-            break;
-         } else {
-            // This could be an addon.
-            $Info = self::ParseInfoArray($Entry['Path']);
-            if (!is_array($Info) && count($Info))
-               continue;
+        // If oldType is present then use that.
+        if (!in_array($type, $validTypes)) {
+            $type = val('OldType', $addonInfo, false);
+        }
 
-            $Key = key($Info);
-            $Variable = $Info['Variable'];
-            $Info = $Info[$Key];
+        // If priority is lower than Addon::PRIORITY_PLUGIN then its an application.
+        if (!in_array($type, $validTypes) && (val('Priority', $type, Addon::PRIORITY_HIGH) < Addon::PRIORITY_PLUGIN)) {
+            $type = 'application';
+        }
 
-            // Validate the addon.
-            $Name = $Entry['Name'];
-            $Valid = TRUE;
-            if (!GetValue('Name', $Info)) {
-               $Info['Name'] = $Key;
+        // Otherwise, we got a plugin
+        if (!in_array($type, $validTypes)) {
+            $type = 'plugin';
+        }
+
+        $addonInfo['Variable'] = ucfirst($type).'Info';
+        $info = [$slug => $addonInfo];
+
+        return $info;
+    }
+
+    /**
+     * Check an addon's file to extract the addon information out of it.
+     *
+     * @param string $path The path to the file.
+     * @param bool $throwError Whether or not to throw an exception if there is a problem analyzing the addon.
+     * @return array An array of addon information.
+     * @deprecated since 2.3
+     */
+    public static function analyzeAddon($path, $throwError = true) {
+        deprecated(__CLASS__.'->'.__METHOD__.'()');
+        if (!file_exists($path)) {
+            if ($throwError) {
+                throw new Exception("$path not found.", 404);
             }
-            
-            if (!GetValue('Description', $Info)) {
-               $Result[] = $Name.': '.sprintf(T('ValidateRequired'), T('Description'));
-               $Valid = FALSE;
-            }
+            return false;
+        }
 
-            if (!GetValue('Version', $Info)) {
-               $Result[] = $Name.': '.sprintf(T('ValidateRequired'), T('Version'));
-               $Valid = FALSE;
-            }
+        $addon = [];
+        $result = [];
 
-            if (isset($Entry['Base']) && strcasecmp($Entry['Base'], $Key) != 0 && $Variable != 'ThemeInfo') {
-               $Result[] = "$Name: The addon's key is not the same as its folder name.";
-               $Valid = FALSE;
-            }
+        $infoPaths = [
+            '/addon.json', // addon
+            '/settings/about.php', // application
+            '/default.php', // plugin
+            '/class.*.plugin.php', // plugin
+            '/about.php', // theme
+            '/definitions.php', // locale
+            '/environment.php', // vanilla core
+            'vanilla2export.php' // porter
+        ];
 
-            if (!$Valid)
-               continue;
+        // Look for an addon.json file.
+        if (file_exists("$path/addon.json")) {
 
-            // The addon is valid.
-            $Addon = array_merge(array('AddonKey' => $Key, 'AddonTypeID' => ''), $Info);
-            switch ($Variable) {
-               case 'ApplicationInfo':
-                  $Addon['AddonTypeID'] = ADDON_TYPE_APPLICATION;
-                  break;
-               case 'LocaleInfo':
-                  $Addon['AddonTypeID'] = ADDON_TYPE_LOCALE;
-                  break;
-               case 'PluginInfo':
-                  $Addon['AddonTypeID'] = ADDON_TYPE_PLUGIN;
-                  break;
-               case 'ThemeInfo':
-                  $Addon['AddonTypeID'] = ADDON_TYPE_THEME;
-                  break;  
-            }
-         }
-      }
+            $info = self::addonJsonConverter($path);
 
-      if ($DeleteEntries) {
-         $FolderPath = substr($Path, 0, -4);
-         Gdn_FileSystem::RemoveFolder($FolderPath);
-      }
+            $entry = [
+                'Path' => $path,
+                'Name' => val('Name', $info[key($info)]),
+                'Base' => val('Key', $info[key($info)])
+            ];
 
-      // Add the addon requirements.
-      if ($Addon) {
-         $Requirements = ArrayTranslate($Addon, array('RequiredApplications' => 'Applications', 'RequiredPlugins' => 'Plugins', 'RequiredThemes' => 'Themes'));
-         foreach ($Requirements as $Type => $Items) {
-            if (!is_array($Items))
-               unset($Requirements[$Type]);
-         }
-         $Addon['Requirements'] = serialize($Requirements);
-
-         $Addon['Checked'] = TRUE;
-         $Addon['Path'] = $Path;
-         $UploadsPath = PATH_UPLOADS.'/';
-         if (StringBeginsWith($Addon['Path'], $UploadsPath)) {
-            $Addon['File'] = substr($Addon['Path'], strlen($UploadsPath));
-         }
-
-         if (is_file($Path)) {
-            $Addon['MD5'] = md5_file($Path);
-            $Addon['FileSize'] = filesize($Path);
-         }
-      } elseif ($ThrowError) {
-         $Msg = implode("\n", $Result);
-         throw new Gdn_UserException($Msg, 400);
-      } else {
-         return FALSE;
-      }
-
-      return $Addon;
-
-      // Figure out what kind of addon this is.
-      $Root = '';
-      $NewRoot = '';
-      $Addon = FALSE;
-      foreach ($Entries as $Entry) {
-         $Name = '/'.ltrim($Entry['name'], '/');
-         $Filename = basename($Name);
-         $Folder = substr($Name, 0, -strlen($Filename));
-         $NewRoot = '';
-
-         // Check to see if the entry is a plugin file.
-         if ($Filename == 'default.php' || StringEndsWith($Filename, '.plugin.php')) {
-            if (count(explode('/', $Folder)) > 3) {
-               // The file is too deep to be a plugin file.
-               continue;
+            $result = self::checkAddon($info, $entry);
+            if (empty($result)) {
+                $addon = self::buildAddon($info);
             }
 
-            // This could be a plugin file, but we have to examine its info array.
-            $Zip->extractTo($FolderPath, $Entry['name']);
-            $FilePath = CombinePaths(array($FolderPath, $Name));
-            $Info = self::ParseInfoArray($FilePath, 'PluginInfo');
-            Gdn_FileSystem::RemoveFolder(dirname($FilePath));
-
-            if (!is_array($Info) || !count($Info))
-               continue;
-
-            // Check to see if the info array conforms to a plugin spec.
-            $Key = key($Info);
-            $Info = $Info[$Key];
-            $Root = trim($Folder, '/');
-
-            $Valid = TRUE;
-
-            // Make sure the key matches the folder name.
-            if ($Root && strcasecmp($Root, $Key) != 0) {
-               $Result[] = "$Name: The plugin's key is not the same as its folder name.";
-               $Valid = FALSE;
+        } else {
+            // Get the list of potential files to analyze.
+            if (is_dir($path)) {
+                $entries = self::getInfoFiles($path, $infoPaths);
+                $deleteEntries = false;
             } else {
-               $NewRoot = $Root;
+                $entries = self::getInfoZip($path, $infoPaths, false, $throwError);
+                $deleteEntries = true;
             }
 
-            if (!GetValue('Description', $Info)) {
-               $Result[] = $Name.': '.sprintf(T('ValidateRequired'), T('Description'));
-               $Valid = FALSE;
+            foreach ($entries as $entry) {
+                if ($entry['Name'] == '/environment.php') {
+                    // This could be the core vanilla package.
+                    $version = self::parseCoreVersion($entry['Path']);
+
+                    if (!$version) {
+                        continue;
+                    }
+
+                    // The application was confirmed.
+                    $addon = [
+                        'AddonKey' => 'vanilla',
+                        'AddonTypeID' => ADDON_TYPE_CORE,
+                        'Name' => 'Vanilla',
+                        'Description' => 'Vanilla is a powerfully simple discussion forum you can easily customize to make as unique as your community.',
+                        'Version' => $version,
+                        'License' => 'GPLv2',
+                        'Path' => $entry['Path']];
+                    break;
+                } elseif ($entry['Name'] == 'vanilla2export.php') {
+                    // This could be the vanilla porter.
+                    $version = self::parseCoreVersion($entry['Path']);
+
+                    if (!$version) {
+                        continue;
+                    }
+
+                    $addon = [
+                        'AddonKey' => 'porter',
+                        'AddonTypeID' => ADDON_TYPE_CORE,
+                        'Name' => 'Vanilla Porter',
+                        'Description' => 'Migrate your legacy forum to Vanilla for the first time. Drop this script in your existing site and navigate to it in your web browser to export your legacy forum data.',
+                        'Version' => $version,
+                        'License' => 'GPLv2',
+                        'Path' => $entry['Path']];
+                    break;
+                } else {
+                    // Support for newer addon.json info.
+                    if ($entry['Name'] === '/addon.json') {
+                        // Build a relative path to addon.json.
+                        $addonDir = dirname($entry['Path']);
+                        $addonDir = stringBeginsWith($addonDir, PATH_ROOT, false, true);
+                        $info = self::addonJsonConverter($addonDir);
+                    } else {
+                        // This could be an addon.
+                        $info = self::parseInfoArray($entry['Path']);
+                    }
+
+                    $result = self::checkAddon($info, $entry);
+                    if (!empty($result)) {
+                        continue;
+                    }
+
+                    $addon = self::buildAddon($info);
+                }
             }
 
-            if (!GetValue('Version', $Info)) {
-               $Result[] = $Name.': '.sprintf(T('ValidateRequired'), T('Version'));
-               $Valid = FALSE;
+            if ($deleteEntries) {
+                $folderPath = substr($path, 0, -4);
+                Gdn_FileSystem::removeFolder($folderPath);
+            }
+        }
+
+        // Add the addon requirements.
+        if (!empty($addon)) {
+            $requirements = arrayTranslate(
+                $addon,
+                [
+                    'RequiredApplications' => 'Applications',
+                    'RequiredPlugins' => 'Plugins',
+                    'RequiredThemes' => 'Themes',
+                    'Require' => 'Addons'
+                ]
+            );
+            foreach ($requirements as $type => $items) {
+                if (!is_array($items)) {
+                    unset($requirements[$type]);
+                }
+            }
+            $addon['Requirements'] = dbencode($requirements);
+
+            $addon['Checked'] = true;
+            $addon['Path'] = $path;
+            $uploadsPath = PATH_UPLOADS.'/';
+            if (stringBeginsWith($addon['Path'], $uploadsPath)) {
+                $addon['File'] = substr($addon['Path'], strlen($uploadsPath));
             }
 
-            if ($Valid) {
-               // The plugin was confirmed.
-               $Addon = array(
-                   'AddonKey' => $Key,
-                   'AddonTypeID' => ADDON_TYPE_PLUGIN,
-                   'Name' => GetValue('Name', $Info) ? $Info['Name'] : $Key,
-                   'Description' => $Info['Description'],
-                   'Version' => $Info['Version'],
-                   'Path' => $Path);
-               break;
+            if (is_file($path)) {
+                $addon['MD5'] = md5_file($path);
+                $addon['FileSize'] = filesize($path);
             }
-            continue;
-         }
+        } elseif ($throwError) {
+            $msg = implode("\n", $result);
+            throw new Gdn_UserException($msg, 400);
+        } else {
+            return false;
+        }
 
-         // Check to see if the entry is an application file.
-         if (StringEndsWith($Name, '/settings/about.php')) {
-            if (count(explode('/', $Folder)) > 4) {
-               $Result[] = "$Name: The application's info array was not in the correct location.";
-               // The file is too deep to be a plugin file.
-               continue;
+        return $addon;
+    }
+
+    /**
+     * Takes an addon's info array and adds extra info to it that is expected by the update model.
+     *
+     * @param $info The addon info array. The expected format is `addon-key => addon-info`,
+     *     where addon-info is the addon's info array.
+     * @return array The addon with the extra info included, or an empty array if $info is bad.
+     */
+    private static function buildAddon($info) {
+        if (!is_array($info) && count($info)) {
+            return [];
+        }
+
+        $key = key($info);
+        $variable = $info['Variable'];
+        $info = $info[$key];
+
+        // If there wasn't a "Variable" in the original $info, try the updated $info.
+        if (empty($variable) && array_key_exists('Variable', $info)) {
+            $variable = $info['Variable'];
+        }
+
+        $addon = array_merge(['AddonKey' => $key, 'AddonTypeID' => ''], $info);
+        switch ($variable) {
+            case 'ApplicationInfo':
+                $addon['AddonTypeID'] = ADDON_TYPE_APPLICATION;
+                break;
+            case 'LocaleInfo':
+                $addon['AddonTypeID'] = ADDON_TYPE_LOCALE;
+                break;
+            case 'PluginInfo':
+                $addon['AddonTypeID'] = ADDON_TYPE_PLUGIN;
+                break;
+            case 'ThemeInfo':
+                $addon['AddonTypeID'] = ADDON_TYPE_THEME;
+                break;
+        }
+
+        return $addon;
+    }
+
+
+    /**
+     * Checks an addon. Returns a collection of errors in an array. If no errors exist, returns an empty array.
+     *
+     * @param $info The addon info array. The expected format is `addon-key => addon-info`,
+     *     where addon-info is the addon's info array.
+     * @param $entry Information on where the info was retrieved from. Should include the keys: 'Name' and 'Base',
+     *     for the addon name and the addon folder, respectively.
+     * @return array The errors with the addon, or an empty array.
+     */
+    private static function checkAddon($info, $entry) {
+        $result = [];
+
+        if (!is_array($info) && count($info)) {
+            return ['Could not parse addon info array.'];
+        }
+
+        $key = key($info);
+        $variable = $info['Variable'];
+        $info = $info[$key];
+
+        // Validate the addon.
+        $name = $entry['Name'];
+        if (!val('Name', $info)) {
+            $info['Name'] = $key;
+        }
+
+        // Validate basic fields.
+        $checkResult = self::checkRequiredFields($info);
+        if (count($checkResult)) {
+            $result = array_merge($result, $checkResult);
+        }
+
+        // Validate folder name matches key.
+        if (isset($entry['Base']) && strcasecmp($entry['Base'], $key) != 0 && $variable != 'ThemeInfo') {
+            $result[] = "$name: The addon's key is not the same as its folder name.";
+        }
+
+        return $result;
+    }
+
+    /**
+     *
+     *
+     * @param string $path
+     * @param array $infoPaths
+     * @return array
+     * @deprecated since 2.3
+     */
+    private static function getInfoFiles($path, $infoPaths) {
+        deprecated(__CLASS__.'->'.__METHOD__.'()');
+        $path = str_replace('\\', '/', rtrim($path));
+
+        $result = [];
+        // Check to see if the paths exist.
+        foreach ($infoPaths as $infoPath) {
+            $glob = glob($path.$infoPath);
+            if (is_array($glob)) {
+                foreach ($glob as $globPath) {
+                    $result[] = ['Name' => substr($globPath, strlen($path)), 'Path' => $globPath];
+                }
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Open a zip archive and inspect its contents for the requested paths.
+     *
+     * @param string $path
+     * @param array $infoPaths
+     * @param bool $tmpPath
+     * @param bool $throwError
+     * @return array
+     * @throws Exception
+     * @deprecated since 2.3
+     */
+    private static function getInfoZip($path, $infoPaths, $tmpPath = false, $throwError = true) {
+        deprecated(__CLASS__.'->'.__METHOD__.'()');
+        // Extract the zip file so we can make sure it has appropriate information.
+        $zip = null;
+        $zipOpened = false;
+
+        if (class_exists('ZipArchive', false)) {
+            $zip = new ZipArchive();
+            $zipOpened = $zip->open($path);
+            if ($zipOpened !== true) {
+                $zip = null;
+            }
+        }
+
+        if (!$zip) {
+            $zip = new PclZipAdapter();
+            $zipOpened = $zip->open($path);
+        }
+
+        if ($zipOpened !== true) {
+            if ($throwError) {
+                $errors = [ZipArchive::ER_EXISTS => 'ER_EXISTS', ZipArchive::ER_INCONS => 'ER_INCONS', ZipArchive::ER_INVAL => 'ER_INVAL',
+                    ZipArchive::ER_MEMORY => 'ER_MEMORY', ZipArchive::ER_NOENT => 'ER_NOENT', ZipArchive::ER_NOZIP => 'ER_NOZIP',
+                    ZipArchive::ER_OPEN => 'ER_OPEN', ZipArchive::ER_READ => 'ER_READ', ZipArchive::ER_SEEK => 'ER_SEEK'];
+                $error = val($zipOpened, $errors, 'Unknown Error');
+
+                throw new Exception(t('Could not open addon file. Addons must be zip files.')." ($error)", 400);
+            }
+            return [];
+        }
+
+        if ($tmpPath === false) {
+            $tmpPath = dirname($path).'/'.basename($path, '.zip').'/';
+        }
+
+        if (file_exists($tmpPath)) {
+            Gdn_FileSystem::removeFolder($tmpPath);
+        }
+
+        $result = [];
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $entry = $zip->statIndex($i);
+
+            if (preg_match('#(\.\.[\\/])#', $entry['name'])) {
+                throw new Gdn_UserException("Invalid path in zip file: ".$entry['name']);
             }
 
-            // This could be a plugin file, but we have to examine its info array.
-            $Zip->extractTo($FolderPath, $Entry['name']);
-            $FilePath = CombinePaths(array($FolderPath, $Name));
-            $Info = self::ParseInfoArray($FilePath, 'ApplicationInfo');
-            Gdn_FileSystem::RemoveFolder(dirname($FilePath));
+            $name = '/'.ltrim($entry['name'], '/');
 
-            if (!is_array($Info) || !count($Info)) {
-               $Result[] = "$Name: The application's info array could not be parsed.";
-               continue;
+            foreach ($infoPaths as $infoPath) {
+                $preg = '`('.str_replace(['.', '*'], ['\.', '.*'], $infoPath).')$`';
+                if (preg_match($preg, $name, $matches)) {
+                    $base = trim(substr($name, 0, -strlen($matches[1])), '/');
+
+                    if (strpos($base, '/') !== false) {
+                        continue; // file nested too deep.
+                    }
+                    if (!file_exists($tmpPath)) {
+                        mkdir($tmpPath, 0777, true);
+                    }
+
+                    $zip->extractTo($tmpPath, $entry['name']);
+                    $result[] = ['Name' => $matches[1], 'Path' => $tmpPath.rtrim($entry['name'], '/'), 'Base' => $base];
+                }
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Parse the version out of the core's index.php file.
+     *
+     * @param string $path The path to the index.php file.
+     * @return string A string containing the version or empty if the file could not be parsed.
+     * @deprecated since 2.3
+     */
+    public static function parseCoreVersion($path) {
+        deprecated(__CLASS__.'->'.__METHOD__.'()');
+        $fp = fopen($path, 'rb');
+        $application = false;
+        $version = '';
+
+        while (($line = fgets($fp)) !== false) {
+            if (preg_match("`define\\('(.*?)', '(.*?)'\\);`", $line, $matches)) {
+                $name = $matches[1];
+                $value = $matches[2];
+                switch ($name) {
+                    case 'APPLICATION':
+                        $application = $value;
+                        break;
+                    case 'APPLICATION_VERSION':
+                        $version = $value;
+                }
             }
 
-            $Key = key($Info);
-            $Info = $Info[$Key];
-            $Root = trim(substr($Name, 0, -strlen('/settings/about.php')), '/');
-            $Valid = TRUE;
+            if ($application !== false && $version !== '') {
+                break;
+            }
+        }
+        fclose($fp);
+        return $version;
+    }
 
-            // Make sure the key matches the folder name.
-            if ($Root && strcasecmp($Root, $Key) != 0) {
-               $Result[] = "$Name: The application's key is not the same as its folder name.";
-               $Valid = FALSE;
+    /**
+     * Offers a quick and dirty way of parsing an addon's info array without using eval().
+     *
+     * @param string $path The path to the info array.
+     * @param string|false $variable The name of variable containing the information.
+     * @return array|false The info array or false if the file could not be parsed.
+     * @deprecated since 2.3
+     */
+    public static function parseInfoArray($path, $variable = false) {
+        deprecated(__CLASS__.'->'.__METHOD__.'()');
+        $fp = fopen($path, 'rb');
+        $lines = [];
+        $inArray = false;
+        $globalKey = '';
+
+        // Get all of the lines in the info array.
+        while (($line = fgets($fp)) !== false) {
+            // Remove comments from the line.
+            $line = preg_replace('`\s//.*$`', '', $line);
+            if (!$line) {
+                continue;
+            }
+
+            if (!$inArray && preg_match('`\$([A-Za-z]+Info)\s*\[`', trim($line), $matches)) {
+                $variable = $matches[1];
+                if (preg_match('`\[\s*[\'"](.+?)[\'"]\s*\]`', $line, $matches)) {
+                    $globalKey = $matches[1];
+                    $inArray = true;
+                }
+            } elseif ($inArray && stringEndsWith(trim($line), ';')) {
+                break;
+            } elseif ($inArray) {
+                $lines[] = trim($line);
+            }
+        }
+        fclose($fp);
+
+        if (count($lines) == 0) {
+            return false;
+        }
+
+        // Parse the name/value information in the arrays.
+        $result = [];
+        foreach ($lines as $line) {
+            // Get the name from the line.
+            if (!preg_match('`[\'"](.+?)[\'"]\s*=>`', $line, $matches) || !substr($line, -1) == ',') {
+                continue;
+            }
+            $key = $matches[1];
+
+            // Strip the key from the line.
+            $line = trim(trim(substr(strstr($line, '=>'), 2)), ',');
+
+            if (strlen($line) == 0) {
+                continue;
+            }
+
+            $value = null;
+            if (is_numeric($line)) {
+                $value = $line;
+            } elseif (strcasecmp($line, 'TRUE') == 0 || strcasecmp($line, 'FALSE') == 0)
+                $value = $line;
+            elseif (in_array($line[0], ['"', "'"]) && substr($line, -1) == $line[0]) {
+                $quote = $line[0];
+                $value = trim($line, $quote);
+                $value = str_replace('\\'.$quote, $quote, $value);
+            } elseif (stringBeginsWith($line, 'array(') && substr($line, -1) == ')') {
+                // Parse the line's array.
+                $line = substr($line, 6, strlen($line) - 7);
+                $items = explode(',', $line);
+                $array = [];
+                foreach ($items as $item) {
+                    $subItems = explode('=>', $item);
+                    if (count($subItems) == 1) {
+                        $array[] = trim(trim($subItems[0]), '"\'');
+                    } elseif (count($subItems) == 2) {
+                        $subKey = trim(trim($subItems[0]), '"\'');
+                        $subValue = trim(trim($subItems[1]), '"\'');
+                        $array[$subKey] = $subValue;
+                    }
+                }
+                $value = $array;
+            }
+
+            if ($value != null) {
+                $result[$key] = $value;
+            }
+        }
+        $result = [$globalKey => $result, 'Variable' => $variable];
+        return $result;
+    }
+
+    /**
+     *
+     *
+     * @param array $myAddons
+     * @param array $latestAddons
+     * @return bool
+     * @deprecated since 2.3
+     */
+    public function compareAddons($myAddons, $latestAddons) {
+        deprecated(__CLASS__.'->'.__METHOD__.'()');
+        $updateAddons = false;
+
+        // Join the site addons with my addons.
+        foreach ($latestAddons as $addon) {
+            $key = val('AddonKey', $addon);
+            $type = val('Type', $addon);
+            $slug = strtolower($key).'-'.strtolower($type);
+            $version = val('Version', $addon);
+            $fileUrl = val('Url', $addon);
+
+            if (isset($myAddons[$slug])) {
+                $myAddon = $myAddons[$slug];
+
+                if (version_compare($version, val('Version', $myAddon, '999'), '>')) {
+                    $myAddon['NewVersion'] = $version;
+                    $myAddon['NewDownloadUrl'] = $fileUrl;
+                    $updateAddons[$slug] = $myAddon;
+                }
             } else {
-               $NewRoot = $Root;
+                unset($myAddons[$slug]);
+            }
+        }
+
+        return $updateAddons;
+    }
+
+    /**
+     * Check globally required fields in our addon info.
+     *
+     * @param $info
+     * @return array $results
+     * @deprecated since 2.3
+     */
+    protected static function checkRequiredFields($info) {
+        deprecated(__CLASS__.'->'.__METHOD__.'()');
+        $results = [];
+
+        if (!val('Description', $info)) {
+            $results[] = sprintf(t('ValidateRequired'), t('Description'));
+        }
+
+        if (!val('Version', $info)) {
+            $results[] = sprintf(t('ValidateRequired'), t('Version'));
+        }
+
+        if (!val('License', $info)) {
+            $results[] = sprintf(t('ValidateRequired'), t('License'));
+        }
+
+        return $results;
+    }
+
+    /**
+     * Deprecated.
+     *
+     * @param bool $enabled Deprecated.
+     * @return array Deprecated.
+     * @deprecated since 2.3
+     */
+    public function getAddons($enabled = false) {
+        deprecated(__CLASS__.'->'.__METHOD__.'()');
+        return [];
+    }
+
+    /**
+     * Deprecated.
+     *
+     * @param bool $enabled Deprecated.
+     * @return array|bool Deprecated.
+     * @deprecated
+     */
+    public function getAddonUpdates($enabled = false) {
+        deprecated(__CLASS__.'->'.__METHOD__.'()');
+    }
+
+    /**
+     * Run the structure for all addons.
+     *
+     * The structure runs the addons in priority order so that higher priority addons override lower priority ones.
+     *
+     * @param bool $captureOnly Run the structure or just capture the SQL changes.
+     * @return array Returns an array of captured SQL.
+     * @throws Throwable Throws an exception if in debug mode and something goes wrong.
+     */
+    public function runStructure($captureOnly = false) {
+        $this->saveStatus(self::STATUS_RUNNING);
+
+        $userID = Gdn::session()->UserID;
+        try {
+            $r = $this->runStructureInternal($captureOnly);
+            $this->saveStatus(self::STATUS_SUCCESS);
+            return $r;
+        } catch (\Throwable $ex) {
+            $this->saveStatus(self::STATUS_ERROR, $ex->getMessage());
+            throw $ex;
+        } finally {
+            if ($userID && $userID !== Gdn::session()->UserID) {
+                Gdn::session()->start($userID, false, false);
+            } elseif (!$userID && null !== c('Garden.Installed', false)) {
+            // Vanilla has an alternate install method where this config value is set to null.
+            // When this using this alternate install method we don't have authenticators configured and can't end the session.
+                Gdn::session()->end();
+            }
+        }
+    }
+
+    /**
+     * Run the structure update.
+     *
+     * @param bool $captureOnly If **true** will just capture SQL.
+     * @return array Returns an array of update SQL.
+     * @throws Exception Throws an exception if in debug mode.
+     */
+    private function runStructureInternal(bool $captureOnly): array {
+        $addons = array_reverse(Gdn::addonManager()->getEnabled());
+
+        // These variables are required for included structure files.
+        $Database = Gdn::database();
+        $SQL = $this->SQL;
+        $SQL->CaptureModifications = $captureOnly;
+        $Structure = Gdn::structure();
+        $Structure->CaptureOnly = $captureOnly;
+
+        /* @var Addon $addon */
+        foreach ($addons as $addon) {
+            // Look for a structure file.
+            if ($structure = $addon->getSpecial('structure')) {
+                Logger::event(
+                    'addon_structure',
+                    Logger::DEBUG,
+                    "Executing structure for {addonKey}.",
+                    [
+                        'addonKey' => $addon->getKey(),
+                        'structureType' => 'file',
+                        \Vanilla\Logger::FIELD_CHANNEL => \Vanilla\Logger::CHANNEL_SYSTEM,
+                    ]
+                );
+
+                try {
+                    include $addon->path($structure);
+
+                    // Use the system user if specified.
+                    $systemUserID = Gdn::userModel()->getSystemUserID();
+                    if ($addon->getGlobalKey() === 'dashboard' && $systemUserID) {
+                        Gdn::session()->start($systemUserID, false, false);
+                    }
+                } catch (\Throwable $ex) {
+                    trigger_error("Error running structure: ".$ex->getMessage(), E_USER_WARNING);
+                    if (debug()) {
+                        throw $ex;
+                    }
+                }
             }
 
-            if (!GetValue('Description', $Info)) {
-               $Result[] = $Name.': '.sprintf(T('ValidateRequired'), T('Description'));
-               $Valid = FALSE;
+            // Look for a structure method on the plugin.
+            if ($addon->getPluginClass()) {
+                $plugin = Gdn::pluginManager()->getPluginInstance(
+                    $addon->getPluginClass(),
+                    Gdn_PluginManager::ACCESS_CLASSNAME
+                );
+
+                if (is_object($plugin) && method_exists($plugin, 'structure')) {
+                    Logger::event(
+                        'addon_structure',
+                        Logger::DEBUG,
+                        "Executing structure for {addonKey}.",
+                        [
+                            'addonKey' => $addon->getKey(),
+                            'structureType' => 'method',
+                            \Vanilla\Logger::FIELD_CHANNEL => \Vanilla\Logger::CHANNEL_SYSTEM
+                        ]
+                    );
+
+                    try {
+                        call_user_func([$plugin, 'structure']);
+                    } catch (BadMethodCallException $ex) {
+                        // The structure method could not be called, probably because it wasn't public.
+                    } catch (\Exception $ex) {
+                        if (debug()) {
+                            throw $ex;
+                        }
+                    }
+                }
             }
 
-            if (!GetValue('Version', $Info)) {
-               $Result[] = $Name.': '.sprintf(T('ValidateRequired'), T('Version'));
-               $Valid = FALSE;
+            // Register permissions.
+            $permissions = $addon->getInfoValue('registerPermissions');
+            if (!empty($permissions)) {
+                Logger::event(
+                    'addon_permissions',
+                    Logger::INFO,
+                    "Defining permissions for {addonKey}.",
+                    [
+                        'addonKey' => $addon->getKey(),
+                        'permissions' => $permissions,
+                        Logger::FIELD_CHANNEL => Logger::CHANNEL_SYSTEM,
+                    ]
+                );
+                Gdn::permissionModel()->define($permissions);
             }
-
-            if ($Valid) {
-               // The application was confirmed.
-               $Addon = array(
-                   'AddonKey' => $Key,
-                   'AddonTypeID' => ADDON_TYPE_APPLICATION,
-                   'Name' => GetValue('Name', $Info) ? $Info['Name'] : $Key,
-                   'Description' => $Info['Description'],
-                   'Version' => $Info['Version'],
-                   'Path' => $Path);
-               break;
-            }
-            continue;
-         }
-
-         // Check to see if the entry is a theme file.
-         if (StringEndsWith($Name, '/about.php')) {
-            if (count(explode('/', $Folder)) > 3) {
-               // The file is too deep to be a plugin file.
-               continue;
-            }
-
-            // This could be a theme file, but we have to examine its info array.
-            $Zip->extractTo($FolderPath, $Entry['name']);
-            $FilePath = CombinePaths(array($FolderPath, $Name));
-            $Info = self::ParseInfoArray($FilePath, 'ThemeInfo');
-            Gdn_FileSystem::RemoveFolder(dirname($FilePath));
-
-            if (!is_array($Info) || !count($Info))
-               continue;
-
-            $Key = key($Info);
-            $Info = $Info[$Key];
-            $Valid = TRUE;
-
-            $Root = trim(substr($Name, 0, -strlen('/about.php')), '/');
-            // Make sure the theme is at least one folder deep.
-            if (strlen($Root) == 0) {
-               $Result[] = $Name.': The theme must be in a folder.';
-               $Valid = FALSE;
-            }
-
-            if (!GetValue('Description', $Info)) {
-               $Result[] = $Name.': '.sprintf(T('ValidateRequired'), T('Description'));
-               $Valid = FALSE;
-            }
-
-            if (!GetValue('Version', $Info)) {
-               $Result[] = $Name.': '.sprintf(T('ValidateRequired'), T('Version'));
-               $Valid = FALSE;
-            }
-
-            if ($Valid) {
-               // The application was confirmed.
-               $Addon = array(
-                   'AddonKey' => $Key,
-                   'AddonTypeID' => ADDON_TYPE_THEME,
-                   'Name' => GetValue('Name', $Info) ? $Info['Name'] : $Key,
-                   'Description' => $Info['Description'],
-                   'Version' => $Info['Version'],
-                   'Path' => $Path);
-               break;
-            }
-         }
-
-         if (StringEndsWith($Name, '/definitions.php')) {
-            if (count(explode('/', $Folder)) > 3) {
-               // The file is too deep to be a plugin file.
-               continue;
-            }
-
-             // This could be a locale pack, but we have to examine its info array.
-            $Zip->extractTo($FolderPath, $Entry['name']);
-            $FilePath = CombinePaths(array($FolderPath, $Name));
-            $Info = self::ParseInfoArray($FilePath, 'LocaleInfo');
-            Gdn_FileSystem::RemoveFolder(dirname($FilePath));
-
-            if (!is_array($Info) || !count($Info))
-               continue;
-
-            $Key = key($Info);
-            $Info = $Info[$Key];
-            $Valid = TRUE;
-
-            $Root = trim(substr($Name, 0, -strlen('/definitions.php')), '/');
-            // Make sure the locale is at least one folder deep.
-            if ($Root != $Key) {
-               $Result[] = $Name.': The locale pack\'s key must be the same as its folder name.';
-               $Valid = FALSE;
-            }
-
-            if (!GetValue('Locale', $Info)) {
-               $Result[] = $Name.': '.sprintf(T('ValidateRequired'), T('Locale'));
-               $Valud = FALSE;
-            } elseif (strcasecmp($Info['Locale'], $Key) == 0) {
-               $Result[] = $Name.': '.T('The locale\'s key cannot be the same as the name of the locale.');
-               $Valid = FALSE;
-            }
-
-            if (!GetValue('Description', $Info)) {
-               $Result[] = $Name.': '.sprintf(T('ValidateRequired'), T('Description'));
-               $Valid = FALSE;
-            }
-
-            if (!GetValue('Version', $Info)) {
-               $Result[] = $Name.': '.sprintf(T('ValidateRequired'), T('Version'));
-               $Valid = FALSE;
-            }
-
-            if ($Valid) {
-               // The locale pack was confirmed.
-               $Addon = array(
-                   'AddonKey' => $Key,
-                   'AddonTypeID' => ADDON_TYPE_LOCALE,
-                   'Name' => GetValue('Name', $Info) ? $Info['Name'] : $Key,
-                   'Description' => $Info['Description'],
-                   'Version' => $Info['Version'],
-                   'Path' => $Path);
-               break;
-            }
-         }
-
-         // Check to see if the entry is a core file.
-         if (StringEndsWith($Name, '/index.php')) {
-            if (count(explode('/', $Folder)) != 3) {
-               // The file is too deep to be the core's index.php
-               continue;
-            }
-
-            // This could be a theme file, but we have to examine its info array.
-            $Zip->extractTo($FolderPath, $Entry['name']);
-            $FilePath = CombinePaths(array($FolderPath, $Name));
-
-            // Get the version number from the core.
-            $Version = self::ParseCoreVersion($FilePath);
-
-            if (!$Version)
-               continue;
-
-            // The application was confirmed.
-            $Addon = array(
-                'AddonKey' => 'vanilla',
-                'AddonTypeID' => ADDON_TYPE_CORE,
-                'Name' => 'Vanilla',
-                'Description' => 'Vanilla is an open-source, standards-compliant, multi-lingual, fully extensible discussion forum for the web. Anyone who has web-space that meets the requirements can download and use Vanilla for free!',
-                'Version' => $Version,
-                'Path' => $Path);
-            $Info = array();
-            break;
-         }
-
-      }
-
-      if ($Addon) {
-         // Add the requirements.
-         $Requirements = ArrayTranslate($Info, array('RequiredApplications' => 'Applications', 'RequiredPlugins' => 'Plugins', 'RequiredThemes' => 'Themes'));
-         foreach ($Requirements as $Type => $Items) {
-            if (!is_array($Items))
-               unset($Requirements[$Type]);
-         }
-         $Addon['Requirements'] = serialize($Requirements);
-
-         $Addon['Checked'] = TRUE;
-
-
-         $UploadsPath = PATH_ROOT.'/uploads/';
-         if (StringBeginsWith($Addon['Path'], $UploadsPath)) {
-            $Addon['File'] = substr($Addon['Path'], strlen($UploadsPath));
-         }
-         if ($Fix) {
-            // Delete extraneous files.
-            foreach ($Deletes as $Delete) {
-               $Zip->deleteName($Delete['name']);
-            }
-         }
-      }
-
-      $Zip->close();
-
-      if (file_exists($FolderPath))
-         Gdn_FileSystem::RemoveFolder($FolderPath);
-
-
-      if ($Addon) {
-         $Addon['MD5'] = md5_file($Path);
-         $Addon['FileSize'] = filesize($Path);
-         return $Addon;
-      } else {
-         if ($ThrowError) {
-            $Msg = implode("\n", $Result);
-            throw new Exception($Msg, 400);
-         } else {
-            return FALSE;
-         }
-      }
-   }
-
-   protected static function _GetInfoFiles($Path, $InfoPaths) {
-      $Path = str_replace('\\', '/', rtrim($Path));
-
-      $Result = array();
-      // Check to see if the paths exist.
-      foreach ($InfoPaths as $InfoPath) {
-         $Glob = glob($Path.$InfoPath);
-         if (is_array($Glob)) {
-            foreach ($Glob as $GlobPath) {
-               $Result[] = array('Name' => substr($GlobPath, strlen($Path)), 'Path' => $GlobPath);
-            }
-         }
-      }
-
-      return $Result;
-   }
-
-   protected static function _GetInfoZip($Path, $InfoPaths, $TmpPath = FALSE, $ThrowError = TRUE) {
-      // Extract the zip file so we can make sure it has appropriate information.
-      $Zip = NULL;
-
-      if (class_exists('ZipArchive', FALSE)) {
-         $Zip = new ZipArchive();
-         $ZipOpened = $Zip->open($Path);
-         if ($ZipOpened !== TRUE)
-            $Zip = NULL;
-      }
-
-      if (!$Zip) {
-         require_once PATH_LIBRARY."/vendors/pclzip/class.pclzipadapter.php";
-         $Zip = new PclZipAdapter();
-         $ZipOpened = $Zip->open($Path);
-      }
-
-      if ($ZipOpened !== TRUE) {
-         if ($ThrowError) {
-            $Errors = array(ZIPARCHIVE::ER_EXISTS => 'ER_EXISTS', ZIPARCHIVE::ER_INCONS => 'ER_INCONS', ZIPARCHIVE::ER_INVAL => 'ER_INVAL',
-                ZIPARCHIVE::ER_MEMORY => 'ER_MEMORY', ZIPARCHIVE::ER_NOENT => 'ER_NOENT', ZIPARCHIVE::ER_NOZIP => 'ER_NOZIP',
-               ZIPARCHIVE::ER_OPEN => 'ER_OPEN', ZIPARCHIVE::ER_READ => 'ER_READ', ZIPARCHIVE::ER_SEEK => 'ER_SEEK');
-
-            throw new Exception(T('Could not open addon file. Addons must be zip files.').' ('.$Path.' '.GetValue($ZipOpened, $Errors, 'Unknown Error').')'.$Worked, 400);
-         }
-         return FALSE;
-      }
-
-      if ($TmpPath === FALSE)
-         $TmpPath = dirname($Path).'/'.basename($Path, '.zip').'/';
-      if (file_exists($TmpPath))
-         Gdn_FileSystem::RemoveFolder($TmpPath);
-      
-      $Result = array();
-      for ($i = 0; $i < $Zip->numFiles; $i++) {
-         $Entry = $Zip->statIndex($i);
-         $Name = '/'.ltrim($Entry['name'], '/');
-
-         foreach ($InfoPaths as $InfoPath) {
-            $Preg = '`('.str_replace(array('.', '*'), array('\.', '.*'), $InfoPath).')$`';
-            if (preg_match($Preg, $Name, $Matches)) {
-               $Base = trim(substr($Name, 0, -strlen($Matches[1])), '/');
-               if (strpos($Base, '/') !== FALSE)
-                  continue; // file nested too deep.
-
-               if (!file_exists($TmpPath))
-                  mkdir($TmpPath, 0777, TRUE);
-
-               $Zip->extractTo($TmpPath, $Entry['name']);
-               $Result[] = array('Name' => $Matches[1], 'Path' => $TmpPath.rtrim($Entry['name'], '/'), 'Base' => $Base);
-            }
-         }
-      }
-
-      return $Result;
-   }
-
-   /**
-    * Parse the version out of the core's index.php file.
-    *
-    * @param string $Path The path to the index.php file.
-    * @return string|false A string containing the version or false if the file could not be parsed.
-    */
-   public static function ParseCoreVersion($Path) {
-      $fp = fopen($Path, 'rb');
-      $Application = FALSE;
-      $Version = FALSE;
-
-      while (($Line = fgets($fp)) !== FALSE) {
-         if (preg_match("`define\\('(.*?)', '(.*?)'\\);`", $Line, $Matches)) {
-            $Name = $Matches[1];
-            $Value = $Matches[2];
-            switch ($Name) {
-               case 'APPLICATION':
-                  $Application = $Value;
-                  break;
-               case 'APPLICATION_VERSION':
-                  $Version = $Value;
-            }
-         }
-
-         if ($Application !== FALSE && $Version !== FALSE)
-            break;
-      }
-      fclose($fp);
-      return $Version;
-   }
-
-   /**
-    * Offers a quick and dirty way of parsing an addon's info array without using eval().
-    * @param string $Path The path to the info array.
-    * @param string $Variable The name of variable containing the information.
-    * @return array|false The info array or false if the file could not be parsed.
-    */
-   public static function ParseInfoArray($Path, $Variable = FALSE) {
-      $fp = fopen($Path, 'rb');
-      $Lines = array();
-      $InArray = FALSE;
-
-      // Get all of the lines in the info array.
-      while (($Line = fgets($fp)) !== FALSE) {
-         // Remove comments from the line.
-         $Line = preg_replace('`\s//.*$`', '', $Line);
-         if (!$Line)
-            continue;
-
-         if (!$InArray && preg_match('`\$([A-Za-z]+Info)\s*\[`', trim($Line), $Matches)) {
-            $Variable = $Matches[1];
-            if (preg_match('`\[\s*[\'"](.+?)[\'"]\s*\]`', $Line, $Matches)) {
-               $GlobalKey = $Matches[1];
-               $InArray = TRUE;
-            }
-         } elseif ($InArray && StringEndsWith(trim($Line), ';')) {
-            break;
-         } elseif ($InArray) {
-            $Lines[] = trim($Line);
-         }
-      }
-      fclose($fp);
-
-      if (count($Lines) == 0)
-         return FALSE;
-
-      // Parse the name/value information in the arrays.
-      $Result = array();
-      foreach ($Lines as $Line) {
-         // Get the name from the line.
-         if (!preg_match('`[\'"](.+?)[\'"]\s*=>`', $Line, $Matches) || !substr($Line, -1) == ',')
-            continue;
-         $Key = $Matches[1];
-
-         // Strip the key from the line.
-         $Line = trim(trim(substr(strstr($Line, '=>'), 2)), ',');
-
-         if (strlen($Line) == 0)
-            continue;
-
-         $Value = NULL;
-         if (is_numeric($Line))
-            $Value = $Line;
-         elseif (strcasecmp($Line, 'TRUE') == 0 || strcasecmp($Line, 'FALSE') == 0)
-            $Value = $Line;
-         elseif (in_array($Line[0], array('"', "'")) && substr($Line, -1) == $Line[0]) {
-            $Quote = $Line[0];
-            $Value = trim($Line, $Quote);
-            $Value = str_replace('\\'.$Quote, $Quote, $Value);
-         } elseif (StringBeginsWith($Line, 'array(') && substr($Line, -1) == ')') {
-            // Parse the line's array.
-            $Line = substr($Line, 6, strlen($Line) - 7);
-            $Items = explode(',', $Line);
-            $Array = array();
-            foreach ($Items as $Item) {
-               $SubItems = explode('=>', $Item);
-               if (count($SubItems) == 1) {
-                  $Array[] = trim(trim($SubItems[0]), '"\'');
-               } elseif (count($SubItems) == 2) {
-                  $SubKey = trim(trim($SubItems[0]), '"\'');
-                  $SubValue = trim(trim($SubItems[1]), '"\'');
-                  $Array[$SubKey] = $SubValue;
-               }
-            }
-            $Value = $Array;
-         }
-
-         if ($Value != NULL) {
-            $Result[$Key] = $Value;
-         }
-      }
-      $Result = array($GlobalKey => $Result, 'Variable' => $Variable);
-      return $Result;
-   }
-
-   public function CompareAddons($MyAddons, $LatestAddons, $OnlyUpdates = TRUE) {
-      $UpdateAddons = false;
-
-      // Join the site addons with my addons.
-      foreach ($LatestAddons as $Addon) {
-         $Key = GetValue('AddonKey', $Addon);
-         $Type = GetValue('Type', $Addon);
-         $Slug = strtolower($Key).'-'.strtolower($Type);
-         $Version = GetValue('Version', $Addon);
-         $FileUrl = GetValue('Url', $Addon);
-
-         if (isset($MyAddons[$Slug])) {
-            $MyAddon = $MyAddons[$Slug];
-
-            if (version_compare($Version, GetValue('Version', $MyAddon, '999'), '>')) {
-               $MyAddon['NewVersion'] = $Version;
-               $MyAddon['NewDownloadUrl'] = $FileUrl;
-               $UpdateAddons[$Slug] = $MyAddon;
-            }
-         } else {
-            unset($MyAddons[$Slug]);
-         }
-      }
-
-      return $UpdateAddons;
-   }
-
-   public function GetAddons($Enabled = FALSE) {
-      $Addons = array();
-
-      // Get the core.
-      self::_AddAddon(array('AddonKey' => 'vanilla', 'AddonType' => 'core', 'Version' => APPLICATION_VERSION, 'Folder' => '/'), $Addons);
-
-      // Get a list of all of the applications.
-      $ApplicationManager = new Gdn_ApplicationManager();
-      if ($Enabled) {
-         $Applications = $ApplicationManager->AvailableApplications();
-      } else {
-         $Applications = $ApplicationManager->EnabledApplications();
-      }
-
-      foreach ($Applications as $Key => $Info) {
-         // Exclude core applications.
-         if (in_array(strtolower($Key), array('conversations', 'dashboard', 'skeleton', 'vanilla')))
-            continue;
-
-         $Addon = array('AddonKey' => $Key, 'AddonType' => 'application', 'Version' => GetValue('Version', $Info, '0.0'), 'Folder' => '/applications/'.GetValue('Folder', $Info, strtolower($Key)));
-         self::_AddAddon($Addon, $Addons);
-      }
-
-      // Get a list of all of the plugins.
-      $PluginManager = Gdn::PluginManager();
-      if ($Enabled)
-         $Plugins = $PluginManager->EnabledPlugins();
-      else
-         $Plugins = $PluginManager->AvailablePlugins();
-
-      foreach ($Plugins as $Key => $Info) {
-         // Exclude core plugins.
-         if (in_array(strtolower($Key), array()))
-            continue;
-
-         $Addon = array('AddonKey' => $Key, 'AddonType' => 'plugin', 'Version' => GetValue('Version', $Info, '0.0'), 'Folder' => '/applications/'.GetValue('Folder', $Info, $Key));
-         self::_AddAddon($Addon, $Addons);
-      }
-
-      // Get a list of all the themes.
-      $ThemeManager = new Gdn_ThemeManager();
-      if ($Enabled)
-         $Themes = $ThemeManager->EnabledThemeInfo(TRUE);
-      else
-         $Themes = $ThemeManager->AvailableThemes();
-
-      foreach ($Themes as $Key => $Info) {
-         // Exclude core themes.
-         if (in_array(strtolower($Key), array('default')))
-            continue;
-
-         $Addon = array('AddonKey' => $Key, 'AddonType' => 'theme', 'Version' => GetValue('Version', $Info, '0.0'), 'Folder' => '/themes/'.GetValue('Folder', $Info, $Key));
-         self::_AddAddon($Addon, $Addons);
-      }
-
-      // Get a list of all locales.
-      $LocaleModel = new LocaleModel();
-      if ($Enabled)
-         $Locales = $LocaleModel->EnabledLocalePacks(TRUE);
-      else
-         $Locales = $LocaleModel->AvailableLocalePacks();
-
-      foreach ($Locales as $Key => $Info) {
-         // Exclude core themes.
-         if (in_array(strtolower($Key), array('skeleton')))
-            continue;
-
-         $Addon = array('AddonKey' => $Key, 'AddonType' => 'locale', 'Version' => GetValue('Version', $Info, '0.0'), 'Folder' => '/locales/'.GetValue('Folder', $Info, $Key));
-         self::_AddAddon($Addon, $Addons);
-      }
-
-      return $Addons;
-   }
-
-   public function GetAddonUpdates($Enabled = FALSE, $OnlyUpdates = TRUE) {
-      // Get the addons on this site.
-      $MyAddons = $this->GetAddons($Enabled);
-
-      // Build the query for them.
-      $Slugs = array_keys($MyAddons);
-      array_map('urlencode', $Slugs);
-      $SlugsString = implode(',', $Slugs);
-
-      $Url = $this->AddonSiteUrl.'/addon/getlist.json?ids='.$SlugsString;
-      $SiteAddons = ProxyRequest($Url);
-      $UpdateAddons = array();
-      
-      if ($SiteAddons) {
-         $SiteAddons = GetValue('Addons', json_decode($SiteAddons, TRUE));
-         $UpdateAddons = $this->CompareAddons($MyAddons, $SiteAddons);
-      }
-      return $UpdateAddons;
-   }
-
-   public function RunStructure($AddonCode = NULL, $Explicit = FALSE, $Drop = FALSE) {
-      // Get the structure files for all of the enabled applications.
-      $ApplicationManager = new Gdn_ApplicationManager();
-      $Apps = $ApplicationManager->EnabledApplications();
-      $AppNames = ConsolidateArrayValuesByKey($Apps, 'Folder');
-      $Paths = array();
-      foreach ($Apps as $Key => $AppInfo) {
-         $Path = PATH_APPLICATIONS."/{$AppInfo['Folder']}/settings/structure.php";
-         if (file_exists($Path))
-            $Paths[] = $Path;
-         
-         Gdn::ApplicationManager()->RegisterPermissions($Key, $this->Validation);
-      }
-      
-      // Execute the structures.
-      $Database = Gdn::Database();
-      $SQL = Gdn::SQL();
-      $Structure = Gdn::Structure();
-
-      foreach ($Paths as $Path) {
-         include $Path;
-      }
-
-      // Execute the structures for all of the plugins.
-      $PluginManager = Gdn::PluginManager();
-      
-      $Registered = $PluginManager->RegisteredPlugins();
-      
-      foreach ($Registered as $ClassName => $Enabled) {
-         if (!$Enabled)
-            continue;
-         
-         try {
-            $Plugin = $PluginManager->GetPluginInstance($ClassName, Gdn_PluginManager::ACCESS_CLASSNAME);
-            if (method_exists($Plugin, 'Structure')) {
-               Trace("{$ClassName}->Structure()");
-               $Plugin->Structure();
-            }
-         } catch (Exception $Ex) {
-            // Do nothing, plugin wouldn't load/structure.
-         }
-      }
-   }
+        }
+        $this->fireEvent('AfterStructure');
+
+        if ($captureOnly && property_exists($Structure->Database, 'CapturedSql')) {
+            return $Structure->Database->CapturedSql;
+        }
+        return [];
+    }
+
+    /**
+     * Whether or not to start the system user session.
+     *
+     * @param bool $system The new value.
+     */
+    public function setRunAsSystem(bool $system): void {
+        $this->runAsSystem = $system;
+    }
+
+    /**
+     * @return bool
+     */
+    public function getRunAsSystem(): bool {
+        return $this->runAsSystem;
+    }
+
+    /**
+     * Save an update status to the config to aid support.
+     *
+     * @param string $status One of the `STATUS_*` constants.
+     * @param string|null $message A message to go along with the status
+     */
+    private function saveStatus(string $status, string $message = null) {
+        $now = new \DateTimeImmutable('now', new \DateTimeZone("UTC"));
+
+        try {
+            Gdn::config()->saveToConfig([
+                'Garden.Update.LastUpdate' => $now->format(DateTime::RFC3339),
+                'Garden.Update.Status' => $status,
+                'Garden.Update.Message' => $message,
+            ], '', ['RemoveEmpty' => true]);
+        } catch (\Throwable $ex) {
+            // Don't do anything at this point.
+        }
+    }
 }

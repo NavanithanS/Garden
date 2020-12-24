@@ -1,470 +1,546 @@
-<?php if (!defined('APPLICATION')) exit();
+<?php
+if (!defined('APPLICATION')) exit();
+
+use Vanilla\Cache\StaticCache;
+use Vanilla\Utility\HtmlUtils;
 
 if (!function_exists('AdminCheck')) {
-function AdminCheck($Discussion = NULL, $Wrap = FALSE) {
-   static $UseAdminChecks = NULL;
-   if ($UseAdminChecks === NULL)
-      $UseAdminChecks = C('Vanilla.AdminCheckboxes.Use') && Gdn::Session()->CheckPermission('Garden.Moderation.Manage');
+    /**
+     *
+     *
+     * @param null $discussion
+     * @param bool|FALSE $wrap
+     * @return string
+     */
+    function adminCheck($discussion = null, $wrap = FALSE) {
+        $useAdminChecks = StaticCache::getOrHydrate("useAdminCheck", function () {
+            return c('Vanilla.AdminCheckboxes.Use') && Gdn::session()->checkPermission('Garden.Moderation.Manage');;
+        });
+        if (!$useAdminChecks) {
+            return '';
+        }
 
-   if (!$UseAdminChecks)
-      return '';
+        static $canEdits = [], $checked = NULL;
+        $result = '';
 
-   static $CanEdits = array(), $Checked = NULL;
-   $Result = '';
+        if ($discussion) {
+            if (!isset($canEdits[$discussion->CategoryID])) {
+                $canEdits[$discussion->CategoryID] = val('PermsDiscussionsEdit', CategoryModel::categories($discussion->CategoryID));
+            }
 
-   if ($Discussion) {
-      if (!isset($CanEdits[$Discussion->CategoryID]))
-         $CanEdits[$Discussion->CategoryID] = GetValue('PermsDiscussionsEdit', CategoryModel::Categories($Discussion->CategoryID));
+            if ($canEdits[$discussion->CategoryID]) {
+                // Grab the list of currently checked discussions.
+                if ($checked === null) {
+                    $checked = (array)Gdn::session()->getAttribute('CheckedDiscussions', []);
 
+                    if (!is_array($checked)) {
+                        $checked = [];
+                    }
+                }
 
+                if (in_array($discussion->DiscussionID, $checked))
+                    $itemSelected = ' checked="checked"';
+                else
+                    $itemSelected = '';
 
-      if ($CanEdits[$Discussion->CategoryID]) {   
-         // Grab the list of currently checked discussions.
-         if ($Checked === NULL) {
-            $Checked = (array)Gdn::Session()->GetAttribute('CheckedDiscussions', array());
+                $result = '<span class="AdminCheck"><input type="checkbox" name="DiscussionID[]" aria-label="' . t('Select Discussion') . '" value="' . $discussion->DiscussionID . '" $itemSelected /></span>';
+            }
+        } else {
+            $result = '<span class="AdminCheck"><input type="checkbox" aria-label="' . t('Select Discussion') . '" name="Toggle" /></span>';
+        }
 
-            if (!is_array($Checked))
-               $Checked = array();
-         }
+        if ($wrap) {
+            $result = $wrap[0].$result.$wrap[1];
+        }
 
-         if (in_array($Discussion->DiscussionID, $Checked))
-            $ItemSelected = ' checked="checked"';
-         else
-            $ItemSelected = '';
-
-         $Result = <<<EOT
-<span class="AdminCheck"><input type="checkbox" name="DiscussionID[]" value="{$Discussion->DiscussionID}" $ItemSelected /></span>
-EOT;
-      }
-   } else {
-      $Result = '<span class="AdminCheck"><input type="checkbox" name="Toggle" /></span>';
-   }
-
-   if ($Wrap) {
-      $Result = $Wrap[0].$Result.$Wrap[1];
-   }
-
-   return $Result;
-}
+        return $result;
+    }
 }
 
 if (!function_exists('BookmarkButton')) {
-   function BookmarkButton($Discussion) {
-      if (!Gdn::Session()->IsValid())
-         return '';
-      
-      // Bookmark link
-      $Title = T($Discussion->Bookmarked == '1' ? 'Unbookmark' : 'Bookmark');
-      return Anchor(
-         $Title,
-         '/vanilla/discussion/bookmark/'.$Discussion->DiscussionID.'/'.Gdn::Session()->TransientKey(),
-         'Hijack Bookmark' . ($Discussion->Bookmarked == '1' ? ' Bookmarked' : ''),
-         array('title' => $Title)
-      );
-   }
+    /**
+     *
+     *
+     * @param $discussion
+     * @return string
+     */
+    function bookmarkButton($discussion) {
+        if (!Gdn::session()->isValid()) {
+            return '';
+        }
+
+        // Bookmark link
+        $isBookmarked = $discussion->Bookmarked == '1';
+        $title = t($isBookmarked ? 'Unbookmark' : 'Bookmark');
+        $accessibleLabel= HtmlUtils::accessibleLabel('%s for discussion: "%s"', [t($isBookmarked? 'Unbookmark' : 'Bookmark'), is_array($discussion) ? $discussion["Name"] : $discussion->Name]);
+
+        return anchor(
+            $title,
+            '/discussion/bookmark/'.$discussion->DiscussionID.'/'.Gdn::session()->transientKey(),
+            'Hijack Bookmark'.($discussion->Bookmarked == '1' ? ' Bookmarked' : ''),
+            ['title' => $title, 'role' => "button", 'aria-label' => $accessibleLabel, 'aria-pressed' => $isBookmarked ? "true" : "false"]
+        );
+    }
 }
 
-if (!function_exists('CategoryLink')):
-   
-function CategoryLink($Discussion, $Prefix = ' ') {
-//   if (!$Force && Gdn::Controller()->Data('Category')) {
-//      return;
-//   }
-   $Category = CategoryModel::Categories(GetValue('CategoryID', $Discussion));
-   
-   if ($Category) {
-      return Wrap($Prefix.Anchor(htmlspecialchars($Category['Name']), $Category['Url']), 'span', array('class' => 'MItem Category'));
-   }
-}
+if (!function_exists('CategoryLink')) :
+    /**
+     *
+     *
+     * @param $discussion
+     * @param string $prefix
+     * @return string
+     */
+    function categoryLink($discussion, $prefix = ' ') {
+        $category = CategoryModel::categories(val('CategoryID', $discussion));
+        if ($category) {
+            $name = is_array($category) ? $category["Name"] : $category->Name;
+            $accessibleLabel= HtmlUtils::accessibleLabel('Category: "%s"', [$name]);
+            return wrap(
+        $prefix.anchor(htmlspecialchars($name), $category['Url'], ["aria-label" => $accessibleLabel]),
+                'span',
+                ['class' => 'MItem Category']
+            );
+        }
+    }
 
 endif;
 
-if (!function_exists('DiscussionHeading')):
-   
-function DiscussionHeading() {
-   return T('Discussion');
-}
+if (!function_exists('DiscussionHeading')) :
+    /**
+     *
+     *
+     * @return string
+     */
+    function discussionHeading() {
+        return t('Discussion');
+    }
 
 endif;
 
-if (!function_exists('WriteDiscussion')):
-function WriteDiscussion($Discussion, &$Sender, &$Session) {
-   $CssClass = CssClass($Discussion);
-   $DiscussionUrl = $Discussion->Url;
-   $Category = CategoryModel::Categories($Discussion->CategoryID);
-   
-   if ($Session->UserID)
-      $DiscussionUrl .= '#latest';
-   
-   $Sender->EventArguments['DiscussionUrl'] = &$DiscussionUrl;
-   $Sender->EventArguments['Discussion'] = &$Discussion;
-   $Sender->EventArguments['CssClass'] = &$CssClass;
-   
-   $First = UserBuilder($Discussion, 'First');
-   $Last = UserBuilder($Discussion, 'Last');
-   $Sender->EventArguments['FirstUser'] = &$First;
-   $Sender->EventArguments['LastUser'] = &$Last;
-   
-   $Sender->FireEvent('BeforeDiscussionName');
-   
-   $DiscussionName = $Discussion->Name;
-   if ($DiscussionName == '')
-      $DiscussionName = T('Blank Discussion Topic');
-      
-   $Sender->EventArguments['DiscussionName'] = &$DiscussionName;
+if (!function_exists('WriteDiscussion')) :
+    /**
+     *
+     *
+     * @param $discussion
+     * @param $sender
+     * @param $session
+     */
+    function writeDiscussion($discussion, $sender, $session) {
+        $cssClass = cssClass($discussion);
+        $discussionUrl = $discussion->Url;
+        $category = CategoryModel::categories($discussion->CategoryID);
+        /** @var Vanilla\Formatting\DateTimeFormatter */
+        $dateTimeFormatter = Gdn::getContainer()->get(\Vanilla\Formatting\DateTimeFormatter::class);
 
-   static $FirstDiscussion = TRUE;
-   if (!$FirstDiscussion)
-      $Sender->FireEvent('BetweenDiscussion');
-   else
-      $FirstDiscussion = FALSE;
-      
-   $Discussion->CountPages = ceil($Discussion->CountComments / $Sender->CountCommentsPerPage);
-?>
-<li id="Discussion_<?php echo $Discussion->DiscussionID; ?>" class="<?php echo $CssClass; ?>">
-   <?php
-   if (!property_exists($Sender, 'CanEditDiscussions'))
-      $Sender->CanEditDiscussions = GetValue('PermsDiscussionsEdit', CategoryModel::Categories($Discussion->CategoryID)) && C('Vanilla.AdminCheckboxes.Use');
 
-   $Sender->FireEvent('BeforeDiscussionContent');
+        if ($session->UserID) {
+            $discussionUrl .= '#latest';
+        }
+        $sender->EventArguments['DiscussionUrl'] = &$discussionUrl;
+        $sender->EventArguments['Discussion'] = &$discussion;
+        $sender->EventArguments['CssClass'] = &$cssClass;
 
-//   WriteOptions($Discussion, $Sender, $Session);
-   ?>
-   <span class="Options">
+        $first = userBuilder($discussion, 'First');
+        $last = userBuilder($discussion, 'Last');
+        $sender->EventArguments['FirstUser'] = &$first;
+        $sender->EventArguments['LastUser'] = &$last;
+
+        $sender->fireEvent('BeforeDiscussionName');
+
+        $discussionName = $discussion->Name;
+        $sender->EventArguments['DiscussionName'] = &$discussionName;
+
+        static $firstDiscussion = true;
+        if (!$firstDiscussion) {
+            $sender->fireEvent('BetweenDiscussion');
+        } else {
+            $firstDiscussion = false;
+        }
+
+        $discussion->CountPages = ceil($discussion->CountComments / $sender->CountCommentsPerPage);
+        ?>
+        <li id="Discussion_<?php echo $discussion->DiscussionID; ?>" class="<?php echo $cssClass; ?>">
+            <?php
+            if (!property_exists($sender, 'CanEditDiscussions')) {
+                $sender->CanEditDiscussions = val('PermsDiscussionsEdit', CategoryModel::categories($discussion->CategoryID)) && c('Vanilla.AdminCheckboxes.Use');
+            }
+            $sender->fireEvent('BeforeDiscussionContent');
+            ?>
       <?php
-      echo OptionsList($Discussion);
-      echo BookmarkButton($Discussion);
+      // render legacy options
+      if (!Gdn::themeFeatures()->get('EnhancedAccessibility')) {
+            echo '<span class="Options">';
+            echo optionsList($discussion);
+            echo bookmarkButton($discussion);
+            echo '</span>';
+        }
       ?>
-   </span>
-   <div class="ItemContent Discussion">
-      <div class="Title">
-      <?php 
-         echo AdminCheck($Discussion, array('', ' ')).
-            Anchor($DiscussionName, $DiscussionUrl);
-         $Sender->FireEvent('AfterDiscussionTitle'); 
-      ?>
-      </div>
-      <div class="Meta Meta-Discussion">
-         <?php 
-         WriteTags($Discussion);
-         ?>
-         <span class="MItem MCount ViewCount"><?php
-            printf(PluralTranslate($Discussion->CountViews, 
-               '%s view html', '%s views html', '%s view', '%s views'),
-               BigPlural($Discussion->CountViews, '%s view'));
-         ?></span>
+
+            <div class="ItemContent Discussion">
+                <div class="Title" role="heading" aria-level="3">
+                    <?php
+                    echo adminCheck($discussion, ['', ' ']).anchor($discussionName, $discussionUrl);
+                    $sender->fireEvent('AfterDiscussionTitle');
+                    ?>
+                </div>
+                <div class="Meta Meta-Discussion">
+                    <?php
+                    writeTags($discussion);
+                    ?>
+                    <span class="MItem MCount ViewCount"><?php
+                        printf(pluralTranslate($discussion->CountViews,
+                            '%s view html', '%s views html', t('%s view'), t('%s views')),
+                            bigPlural($discussion->CountViews, '%s view'));
+                        ?></span>
          <span class="MItem MCount CommentCount"><?php
-            printf(PluralTranslate($Discussion->CountComments, 
-               '%s comment html', '%s comments html', '%s comment', '%s comments'),
-               BigPlural($Discussion->CountComments, '%s comment'));
-         ?></span>
+             printf(pluralTranslate($discussion->CountComments,
+                 '%s comment html', '%s comments html', t('%s comment'), t('%s comments')),
+                 bigPlural($discussion->CountComments, '%s comment'));
+             ?></span>
          <span class="MItem MCount DiscussionScore Hidden"><?php
-         $Score = $Discussion->Score;
-         if ($Score == '') $Score = 0;
-         printf(Plural($Score, 
-            '%s point', '%s points',
-            BigPlural($Score, '%s point')));
-         ?></span>
-         <?php
-            echo NewComments($Discussion);
-         
-            $Sender->FireEvent('AfterCountMeta');
+             $score = $discussion->Score;
+             if ($score == '') $score = 0;
+             printf(plural($score,
+                 '%s point', '%s points',
+                 bigPlural($score, '%s point')));
+             ?></span>
+                    <?php
+                    echo newComments($discussion);
+                    $layout = c('Vanilla.Categories.Layout');
 
-            if ($Discussion->LastCommentID != '') {
-               echo ' <span class="MItem LastCommentBy">'.sprintf(T('Most recent by %1$s'), UserAnchor($Last)).'</span> ';
-               echo ' <span class="MItem LastCommentDate">'.Gdn_Format::Date($Discussion->LastDate, 'html').'</span>';
+                    $sender->fireEvent('AfterCountMeta');
+
+                    $discussionName = is_array($discussion) ? $discussion['Name'] : $discussion->Name;
+
+                    if ($discussion->LastCommentID != '') {
+                        echo ' <span class="MItem LastCommentBy">'.sprintf(t('Most recent by %1$s'), userAnchor($last)).'</span> ';
+                        echo ' <span class="MItem LastCommentDate">'.Gdn_Format::date($discussion->LastDate, "html").'</span>';
+                        $userName = $last->Name;
+
+                        if ($layout !== "mixed") {
+                            $template = t('Most recent comment on date %s, in discussion "%s", by user "%s"');
+                            $accessibleVars = [$dateTimeFormatter->formatDate($discussion->LastDate, false), $discussionName, $userName];
+                        } else {
+                            $template = t('Category: "%s"');
+                            $accessibleVars = [$discussion->Category];
+                        }
+
+                    } else {
+                        echo ' <span class="MItem LastCommentBy">'.sprintf(t('Started by %1$s'), userAnchor($first)).'</span> ';
+                        echo ' <span class="MItem LastCommentDate">'.Gdn_Format::date($discussion->FirstDate, "html");
+                        if ($source = val('Source', $discussion)) {
+                            echo ' '.sprintf(t('via %s'), t($source.' Source', $source));
+                        }
+                        echo '</span> ';
+                        $template = t('User "%s" started discussion "%s" on date %s');
+                        $userName = $first->Name;
+                        $accessibleVars = [$userName, $discussionName, $dateTimeFormatter->formatDate($discussion->FirstDate, false)];
+                    }
+
+                    if ($sender->data('_ShowCategoryLink', true) && $category && c('Vanilla.Categories.Use') &&
+                        CategoryModel::checkPermission($category, 'Vanilla.Discussions.View')) {
+                        $accessibleAttributes = ["tabindex" => "0", "aria-label" => HtmlUtils::accessibleLabel($template, $accessibleVars)];
+                        if ($layout === "mixed") { // The links to categories are duplicates and have no accessible value
+                            $accessibleAttributes['tabindex'] = "-1";
+                            $accessibleAttributes['aria-hidden'] = "true";
+                        }
+                        echo wrap(
+                            anchor(htmlspecialchars($discussion->Category),
+                                categoryUrl($discussion->CategoryUrlCode), $accessibleAttributes),
+                            'span',
+                            ['class' => 'MItem Category '.$category['CssClass']]
+                        );
+                    }
+                    $sender->fireEvent('DiscussionMeta');
+                    ?>
+                </div>
+            </div>
+            <?php
+                // render enhanced accessibility options
+                if (Gdn::themeFeatures()->get('EnhancedAccessibility')) {
+                    echo '<span class="Options">';
+                    echo bookmarkButton($discussion);
+                    echo optionsList($discussion);
+                    echo '</span>';
+                }
+                $sender->fireEvent('AfterDiscussionContent');
+            ?>
+        </li>
+    <?php
+    }
+endif;
+
+if (!function_exists('WriteDiscussionSorter')) :
+    /**
+     *
+     *
+     * @param null $selected
+     * @param null $options
+     */
+    function writeDiscussionSorter($selected = null, $options = null) {
+        deprecated('writeDiscussionSorter', 'DiscussionSortFilterModule', 'March 2016');
+
+        if ($selected === null) {
+            $selected = Gdn::session()->getPreference('Discussions.SortField', 'DateLastComment');
+        }
+        $selected = stringBeginsWith($selected, 'd.', TRUE, true);
+
+        $options = [
+            'DateLastComment' => t('Sort by Last Comment', 'by Last Comment'),
+            'DateInserted' => t('Sort by Start Date', 'by Start Date')
+        ];
+
+        ?>
+        <span class="ToggleFlyout SelectFlyout">
+        <?php
+        if (isset($options[$selected])) {
+            $text = $options[$selected];
+        } else {
+            $text = reset($options);
+        }
+        echo wrap($text.' '.sprite('', 'DropHandle'), 'span', ['class' => 'Selected']);
+        ?>
+            <div class="Flyout MenuItems">
+                <ul>
+                    <?php
+                    foreach ($options as $sortField => $sortText) {
+                        echo wrap(anchor($sortText, '#', ['class' => 'SortDiscussions', 'data-field' => $sortField]), 'li');
+                    }
+                    ?>
+                </ul>
+            </div>
+         </span>
+        <?php
+    }
+endif;
+
+if (!function_exists('WriteMiniPager')) :
+    /**
+     *
+     *
+     * @param $discussion
+     */
+    function writeMiniPager($discussion) {
+        if (!property_exists($discussion, 'CountPages')) {
+            return;
+        }
+
+        if ($discussion->CountPages > 1) {
+            echo '<span class="MiniPager">';
+            if ($discussion->CountPages < 5) {
+                for ($i = 0; $i < $discussion->CountPages; $i++) {
+                    writePageLink($discussion, $i + 1);
+                }
             } else {
-               echo ' <span class="MItem LastCommentBy">'.sprintf(T('Started by %1$s'), UserAnchor($First)).'</span> ';
-               echo ' <span class="MItem LastCommentDate">'.Gdn_Format::Date($Discussion->FirstDate, 'html');
-               
-               if ($Source = GetValue('Source', $Discussion)) {
-                  echo ' '.sprintf(T('via %s'), T($Source.' Source', $Source));
-               }
-               
-               echo '</span> ';
+                writePageLink($discussion, 1);
+                writePageLink($discussion, 2);
+                echo '<span class="Elipsis">...</span>';
+                writePageLink($discussion, $discussion->CountPages - 1);
+                writePageLink($discussion, $discussion->CountPages);
+                // echo anchor('Go To Page', '#', 'GoToPageLink');
             }
-         
-            if ($Sender->Data('_ShowCategoryLink', TRUE) && C('Vanilla.Categories.Use') && $Category)
-               echo Wrap(Anchor(htmlspecialchars($Discussion->Category), CategoryUrl($Discussion->CategoryUrlCode)), 'span', array('class' => 'MItem Category '.$Category['CssClass']));
-               
-            $Sender->FireEvent('DiscussionMeta');
-         ?>
-      </div>
-   </div>
-   <?php $Sender->FireEvent('AfterDiscussionContent'); ?>
-</li>
-<?php
-}
-endif;
-
-if (!function_exists('DiscussionSorter')):
-
-function WriteDiscussionSorter($Selected = NULL, $Options = NULL) {
-   if ($Selected === NULL) {
-      $Selected = Gdn::Session()->GetPreference('Discussions.SortField', 'DateLastComment');
-   }
-   $Selected = StringBeginsWith($Selected, 'd.', TRUE, TRUE);
-   
-   $Options = array(
-      'DateLastComment' => T('Sort by Last Comment', 'by Last Comment'),
-      'DateInserted' => T('Sort by Start Date', 'by Start Date')
-   );
-   
-   ?>
-   <span class="ToggleFlyout SelectFlyout">
-   <?php
-      if (isset($Options[$Selected])) {
-         $Text = $Options[$Selected];
-      } else {
-         $Text = reset($Options);
-      }
-      echo Wrap($Text.' '.Sprite('', 'DropHandle'), 'span', array('class' => 'Selected'));
-   ?>
-   <div class="Flyout MenuItems">
-      <ul>
-         <?php 
-            foreach ($Options as $SortField => $SortText) {
-               echo Wrap(Anchor($SortText, '#', array('class' => 'SortDiscussions', 'data-field' => $SortField)), 'li'); 
-            }
-         ?>
-      </ul>
-   </div>
-   </span>
-   <?php
-}
-
-endif;
-
-if (!function_exists('WriteMiniPager')):
-function WriteMiniPager($Discussion) {
-   if (!property_exists($Discussion, 'CountPages'))
-      return;
-   
-   if ($Discussion->CountPages > 1) {
-      echo '<span class="MiniPager">';
-         if ($Discussion->CountPages < 5) {
-            for ($i = 0; $i < $Discussion->CountPages; $i++) {
-               WritePageLink($Discussion, $i+1);
-            }
-         } else {
-            WritePageLink($Discussion, 1);
-            WritePageLink($Discussion, 2);
-            echo '<span class="Elipsis">...</span>';
-            WritePageLink($Discussion, $Discussion->CountPages-1);
-            WritePageLink($Discussion, $Discussion->CountPages);
-            // echo Anchor('Go To Page', '#', 'GoToPageLink');
-         }
-      echo '</span>';
-   }
-}
+            echo '</span>';
+        }
+    }
 endif;
 
 if (!function_exists('WritePageLink')):
-function WritePageLink($Discussion, $PageNumber) {
-   echo Anchor($PageNumber, DiscussionUrl($Discussion, $PageNumber));
-}
+    /**
+     *
+     *
+     * @param $discussion
+     * @param $pageNumber
+     */
+    function writePageLink($discussion, $pageNumber) {
+        echo anchor($pageNumber, discussionUrl($discussion, $pageNumber));
+    }
 endif;
 
-if (!function_exists('NewComments')):
-function NewComments($Discussion) {
-   if (!Gdn::Session()->IsValid())
-      return '';
-   
-   if ($Discussion->CountUnreadComments === TRUE) {
-      $Title = htmlspecialchars(T("You haven't read this yet."));
-      
-      return ' <strong class="HasNew JustNew NewCommentCount" title="'.$Title.'">'.T('new discussion', 'new').'</strong>';
-   } elseif ($Discussion->CountUnreadComments > 0) {
-      $Title = htmlspecialchars(Plural($Discussion->CountUnreadComments, "%s new comment since you last read this.", "%s new comments since you last read this."));
-      
-      return ' <strong class="HasNew NewCommentCount" title="'.$Title.'">'.Plural($Discussion->CountUnreadComments, '%s new', '%s new plural', BigPlural($Discussion->CountUnreadComments, '%s new', '%s new plural')).'</strong>';
-   }
-   return '';
-}
+if (!function_exists('NewComments')) :
+    /**
+     *
+     *
+     * @param $discussion
+     * @return string
+     */
+    function newComments($discussion) {
+        if (!Gdn::session()->isValid())
+            return '';
+
+        if ($discussion->CountUnreadComments === TRUE) {
+            $title = htmlspecialchars(t("You haven't read this yet."));
+
+            return ' <strong class="HasNew JustNew NewCommentCount" title="'.$title.'">'.t('new discussion', 'new').'</strong>';
+        } elseif ($discussion->CountUnreadComments > 0) {
+            $title = htmlspecialchars(plural($discussion->CountUnreadComments, "%s new comment since you last read this.", "%s new comments since you last read this."));
+
+            return ' <strong class="HasNew NewCommentCount" title="'.$title.'">'.plural($discussion->CountUnreadComments, '%s new', '%s new plural', bigPlural($discussion->CountUnreadComments, '%s new', '%s new plural')).'</strong>';
+        }
+        return '';
+    }
 endif;
 
-if (!function_exists('Tag')):
-function Tag($Discussion, $Column, $Code, $CssClass = FALSE) {
-   $Discussion = (object)$Discussion;
-   
-   if (is_numeric($Discussion->$Column) && !$Discussion->$Column)
-      return '';
-   if (!is_numeric($Discussion->$Column) && strcasecmp($Discussion->$Column, $Code) != 0)
-      return;
+if (!function_exists('tag')) :
+    /**
+     *
+     *
+     * @param $discussion
+     * @param $column
+     * @param $code
+     * @param bool|false $cssClass
+     * @return string|void
+     */
+    function tag($discussion, $column, $code, $cssClass = FALSE) {
+        $discussion = (object)$discussion;
 
-   if (!$CssClass)
-      $CssClass = "Tag-$Code";
+        if (is_numeric($discussion->$column) && !$discussion->$column)
+            return '';
+        if (!is_numeric($discussion->$column) && strcasecmp($discussion->$column, $code) != 0)
+            return;
 
-   return ' <span class="Tag '.$CssClass.'" title="'.htmlspecialchars(T($Code)).'">'.T($Code).'</span> ';
-}
+        if (!$cssClass)
+            $cssClass = "Tag-$code";
+
+        return ' <span class="Tag '.$cssClass.'" title="'.htmlspecialchars(t($code)).'">'.t($code).'</span> ';
+
+    }
 endif;
 
-if (!function_exists('WriteTags')):
-function WriteTags($Discussion) {
-   Gdn::Controller()->FireEvent('BeforeDiscussionMeta');
+if (!function_exists('writeTags')) :
+    /**
+     *
+     *
+     * @param $discussion
+     * @throws Exception
+     */
+    function writeTags($discussion) {
+        Gdn::controller()->fireEvent('BeforeDiscussionMeta');
 
-   echo Tag($Discussion, 'Announce', 'Announcement');
-   echo Tag($Discussion, 'Closed', 'Closed');
+        echo tag($discussion, 'Announce', 'Announcement');
+        echo tag($discussion, 'Closed', 'Closed');
 
-   Gdn::Controller()->FireEvent('AfterDiscussionLabels');
-}
+        Gdn::controller()->fireEvent('AfterDiscussionLabels');
+    }
 endif;
 
-if (!function_exists('WriteFilterTabs')):
-function WriteFilterTabs($Sender) {
-   $Session = Gdn::Session();
-   $Title = property_exists($Sender, 'Category') ? GetValue('Name', $Sender->Category, '') : '';
-   if ($Title == '')
-      $Title = T('All Discussions');
-      
-   $Bookmarked = T('My Bookmarks');
-   $MyDiscussions = T('My Discussions');
-   $MyDrafts = T('My Drafts');
-   $CountBookmarks = 0;
-   $CountDiscussions = 0;
-   $CountDrafts = 0;
-   
-   if ($Session->IsValid()) {
-      $CountBookmarks = $Session->User->CountBookmarks;
-      $CountDiscussions = $Session->User->CountDiscussions;
-      $CountDrafts = $Session->User->CountDrafts;
-   }
-   
-   if (C('Vanilla.Discussions.ShowCounts', TRUE)) {
-      $Bookmarked .= CountString($CountBookmarks, Url('/discussions/UserBookmarkCount'));
-      $MyDiscussions .= CountString($CountDiscussions);
-      $MyDrafts .= CountString($CountDrafts);
-   }
-      
-   ?>
-<div class="Tabs DiscussionsTabs">
-   <?php
-   if (!property_exists($Sender, 'CanEditDiscussions'))
-      $Sender->CanEditDiscussions = $Session->CheckPermission('Vanilla.Discussions.Edit', TRUE, 'Category', 'any') && C('Vanilla.AdminCheckboxes.Use');
-   
-   if ($Sender->CanEditDiscussions) {
-   ?>
-   <span class="Options"><span class="AdminCheck">
-      <input type="checkbox" name="Toggle" />
-   </span></span>
-   <?php } ?>
-   <ul>
-      <?php $Sender->FireEvent('BeforeDiscussionTabs'); ?>
-      <li<?php echo strtolower($Sender->ControllerName) == 'discussionscontroller' && strtolower($Sender->RequestMethod) == 'index' ? ' class="Active"' : ''; ?>><?php echo Anchor(T('All Discussions'), 'discussions', 'TabLink'); ?></li>
-      <?php $Sender->FireEvent('AfterAllDiscussionsTab'); ?>
+if (!function_exists('writeFilterTabs')) :
+    /**
+     *
+     *
+     * @param $sender
+     */
+    function writeFilterTabs($sender) {
+        $session = Gdn::session();
+        $title = property_exists($sender, 'Category') ? val('Name', $sender->Category, '') : '';
+        if ($title == '') {
+            $title = t('All Discussions');
+        }
+        $bookmarked = t('My Bookmarks');
+        $myDiscussions = t('My Discussions');
+        $myDrafts = t('My Drafts');
+        $countBookmarks = 0;
+        $countDiscussions = 0;
+        $countDrafts = 0;
 
-      <?php
-      if (C('Vanilla.Categories.ShowTabs')) {
-         $CssClass = '';
-         if (strtolower($Sender->ControllerName) == 'categoriescontroller' && strtolower($Sender->RequestMethod) == 'all') {
-            $CssClass = 'Active';
-         }
+        if ($session->isValid()) {
+            $countBookmarks = $session->User->CountBookmarks;
+            $countDiscussions = $session->User->CountDiscussions;
+            $countDrafts = $session->User->CountDrafts;
+        }
 
-         echo " <li class=\"$CssClass\">".Anchor(T('Categories'), '/categories/all', 'TabLink').'</li> ';
-      }
-      ?>
-      <?php if ($CountBookmarks > 0 || $Sender->RequestMethod == 'bookmarked') { ?>
-      <li<?php echo $Sender->RequestMethod == 'bookmarked' ? ' class="Active"' : ''; ?>><?php echo Anchor($Bookmarked, '/discussions/bookmarked', 'MyBookmarks TabLink'); ?></li>
-      <?php
-         $Sender->FireEvent('AfterBookmarksTab');
-      }
-      if (($CountDiscussions > 0 || $Sender->RequestMethod == 'mine') && C('Vanilla.Discussions.ShowMineTab', TRUE)) {
-      ?>
-      <li<?php echo $Sender->RequestMethod == 'mine' ? ' class="Active"' : ''; ?>><?php echo Anchor($MyDiscussions, '/discussions/mine', 'MyDiscussions TabLink'); ?></li>
-      <?php
-      }
-      if ($CountDrafts > 0 || $Sender->ControllerName == 'draftscontroller') {
-      ?>
-      <li<?php echo $Sender->ControllerName == 'draftscontroller' ? ' class="Active"' : ''; ?>><?php echo Anchor($MyDrafts, '/drafts', 'MyDrafts TabLink'); ?></li>
-      <?php
-      }
-      $Sender->FireEvent('AfterDiscussionTabs');
-      ?>
-   </ul>
-</div>
-   <?php
-}
+        if (c('Vanilla.Discussions.ShowCounts', true)) {
+            $bookmarked .= countString($countBookmarks, '/discussions/UserBookmarkCount');
+            $myDiscussions .= countString($countDiscussions);
+            $myDrafts .= countString($countDrafts);
+        }
+
+        ?>
+        <div class="Tabs DiscussionsTabs">
+            <?php
+            if (!property_exists($sender, 'CanEditDiscussions')) {
+                $sender->CanEditDiscussions = $session->checkPermission('Vanilla.Discussions.Edit', true, 'Category', 'any') && c('Vanilla.AdminCheckboxes.Use');
+            }
+            if ($sender->CanEditDiscussions) {
+                ?>
+                <span class="Options"><span class="AdminCheck">
+                    <input type="checkbox" aria-label="<?php echo t('Select Discussion') ?>" name="Toggle"/>
+                </span></span>
+            <?php } ?>
+            <ul>
+                <?php $sender->fireEvent('BeforeDiscussionTabs'); ?>
+                <li<?php echo strtolower($sender->ControllerName) == 'discussionscontroller' && strtolower($sender->RequestMethod) == 'index' ? ' class="Active"' : ''; ?>><?php echo anchor(t('All Discussions'), 'discussions', 'TabLink'); ?></li>
+                <?php $sender->fireEvent('AfterAllDiscussionsTab'); ?>
+
+                <?php
+                if (c('Vanilla.Categories.ShowTabs')) {
+                    $cssClass = '';
+                    if (strtolower($sender->ControllerName) == 'categoriescontroller' && strtolower($sender->RequestMethod) == 'all') {
+                        $cssClass = 'Active';
+                    }
+
+                    echo " <li class=\"$cssClass\">".anchor(t('Categories'), '/categories/all', 'TabLink').'</li> ';
+                }
+                ?>
+                <?php if ($countBookmarks > 0 || $sender->RequestMethod == 'bookmarked') { ?>
+                    <li<?php echo $sender->RequestMethod == 'bookmarked' ? ' class="Active"' : ''; ?>><?php echo anchor($bookmarked, '/discussions/bookmarked', 'MyBookmarks TabLink'); ?></li>
+                    <?php
+                    $sender->fireEvent('AfterBookmarksTab');
+                }
+                if (($countDiscussions > 0 || $sender->RequestMethod == 'mine') && c('Vanilla.Discussions.ShowMineTab', true)) {
+                    ?>
+                    <li<?php echo $sender->RequestMethod == 'mine' ? ' class="Active"' : ''; ?>><?php echo anchor($myDiscussions, '/discussions/mine', 'MyDiscussions TabLink'); ?></li>
+                <?php
+                }
+                if ($countDrafts > 0 || $sender->ControllerName == 'draftscontroller') {
+                    ?>
+                    <li<?php echo $sender->ControllerName == 'draftscontroller' ? ' class="Active"' : ''; ?>><?php echo anchor($myDrafts, '/drafts', 'MyDrafts TabLink'); ?></li>
+                <?php
+                }
+                $sender->fireEvent('AfterDiscussionTabs');
+                ?>
+            </ul>
+        </div>
+    <?php
+    }
 endif;
 
-if (!function_exists('OptionsList')):
-function OptionsList($Discussion) {
-   $Sender = Gdn::Controller();
-   $Session = Gdn::Session();
-   
-   if ($Session->IsValid() && $Sender->ShowOptions) {
-      $Sender->Options = '';
-      
-      // Dismiss an announcement
-      if (C('Vanilla.Discussions.Dismiss', 1) && $Discussion->Announce == '1' && $Discussion->Dismissed != '1')
-         $Sender->Options .= '<li>'.Anchor(T('Dismiss'), "vanilla/discussion/dismissannouncement?discussionid={$Discussion->DiscussionID}", 'DismissAnnouncement Hijack') . '</li>';
-      
-      // Edit discussion
-      if ($Discussion->FirstUserID == $Session->UserID || $Session->CheckPermission('Vanilla.Discussions.Edit', TRUE, 'Category', $Discussion->PermissionCategoryID))
-         $Sender->Options .= '<li>'.Anchor(T('Edit'), 'vanilla/post/editdiscussion/'.$Discussion->DiscussionID, 'EditDiscussion') . '</li>';
-
-      // Announce discussion
-      if ($Session->CheckPermission('Vanilla.Discussions.Announce', TRUE, 'Category', $Discussion->PermissionCategoryID))
-         $Sender->Options .= '<li>'.Anchor(T('Announce...'), '/discussion/announce?discussionid='.$Discussion->DiscussionID.'&Target='.urlencode($Sender->SelfUrl), 'Popup AnnounceDiscussion') . '</li>';
-
-      // Sink discussion
-      if ($Session->CheckPermission('Vanilla.Discussions.Sink', TRUE, 'Category', $Discussion->PermissionCategoryID)) {
-         $NewSink = (int)!$Discussion->Sink;
-         $Sender->Options .= '<li>'.Anchor(T($Discussion->Sink == '1' ? 'Unsink' : 'Sink'), "vanilla/discussion/sink?discussionid={$Discussion->DiscussionID}&sink={$NewSink}", 'SinkDiscussion Hijack') . '</li>';
-      }
-
-      // Close discussion
-      if ($Session->CheckPermission('Vanilla.Discussions.Close', TRUE, 'Category', $Discussion->PermissionCategoryID)) {
-         $NewClosed = (int)!$Discussion->Closed;
-         $Sender->Options .= '<li>'.Anchor(T($Discussion->Closed == '1' ? 'Reopen' : 'Close'), "/discussion/close?discussionid={$Discussion->DiscussionID}&close=$NewClosed", 'CloseDiscussion Hijack') . '</li>';
-      }
-      
-      // Delete discussion
-      if ($Session->CheckPermission('Vanilla.Discussions.Delete', TRUE, 'Category', $Discussion->PermissionCategoryID))
-         $Sender->Options .= '<li>'.Anchor(T('Delete'), '/discussion/delete?discussionid='.$Discussion->DiscussionID, 'DeleteDiscussion Popup') . '</li>';
-      
-      // Allow plugins to add options.
-      $Sender->EventArguments['Discussion'] = $Discussion;
-      $Sender->FireEvent('DiscussionOptions');
-      
-      if ($Sender->Options != '') {
-         $Result = '<span class="ToggleFlyout OptionsMenu">'.
-            '<span class="OptionsTitle" title="'.T('Options').'">'.T('Options').'</span>'.
-            '<span class="SpFlyoutHandle"></span>'.
-            '<ul class="Flyout MenuItems">'.
-               $Sender->Options.
-            '</ul>'.
-            '</span>';
-         
-         return $Result;
-      }
-     
-   }
-   return '';
-}
-
+if (!function_exists('optionsList')) :
+    /**
+     * Build HTML for discussions options menu.
+     *
+     * @param $discussion
+     * @return DropdownModule|string
+     * @throws Exception
+     */
+    function optionsList($discussion) {
+        if (Gdn::session()->isValid() && !empty(Gdn::controller()->ShowOptions)) {
+            include_once Gdn::controller()->fetchViewLocation('helper_functions', 'discussion', 'vanilla');
+            return getDiscussionOptionsDropdown($discussion);
+        }
+        return '';
+    }
 endif;
 
+if (!function_exists('writeOptions')) :
+    /**
+     * Render options that the user has for this discussion.
+     */
+    function writeOptions($discussion) {
+        if (!Gdn::session()->isValid() || !Gdn::controller()->ShowOptions)
+            return;
 
-if (!function_exists('WriteOptions')):
-/**
- * Render options that the user has for this discussion.
- */
-function WriteOptions($Discussion) {
-   if (!Gdn::Session()->IsValid() || !Gdn::Controller()->ShowOptions)
-      return;
-   
-   
-   echo '<span class="Options">';
-   
-   // Options list.
-   echo OptionsList($Discussion);
+        echo '<span class="Options">';
 
-   // Bookmark button.
-   echo BookmarkButton($Discussion);
+        // Options list.
+        echo optionsList($discussion);
 
-   // Admin check.
-   echo AdminCheck($Discussion);
+        // Bookmark button.
+        echo bookmarkButton($discussion);
 
-   echo '</span>';
-}
+        // Admin check.
+        echo adminCheck($discussion);
+
+        echo '</span>';
+    }
 endif;

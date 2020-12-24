@@ -1,0 +1,23 @@
+{
+    "extends": "@vanilla/tsconfig/base.json",
+    "compilerOptions": {
+        "baseUrl": ".",
+        "paths": {
+            "@library/*": ["./library/src/scripts/*"],
+            "@vanilla/addon-vanilla/*": ["./applications/vanilla/src/scripts/*"],
+            "@dashboard/*": ["./applications/dashboard/src/scripts/*"],
+            "@rich-editor/*": ["./plugins/rich-editor/src/scripts/*"],
+            "@openapi-embed/*": ["./plugins/openapi-embed/src/scripts/*"],
+            "@knowledge/*": ["./plugins/knowledge/src/scripts/*"],
+            "@webhooks/*": ["./plugins/webhooks/src/scripts/*"],
+            "@themingapi/*": ["./plugins/themingapi/src/scripts/*"],
+            "@subcommunities/*": ["./plugins/subcommunities/src/scripts/*"],
+            "@groups/*": ["./applications/groups/src/scripts/*"],
+            "@Ranks/*": ["./plugins/Ranks/src/scripts/*"],
+            "@ElasticSearch/*": ["./plugins/ElasticSearch/src/scripts/*"]
+        },
+        "typeRoots": ["@types", "./node_modules/@types"]
+    },
+    "include": ["**/*.ts", "**/*.tsx", ".storybookAppPages/*.ts*"],
+    "exclude": ["**/*.js", "**/*.jsx", "cloud/**/*", "node_modules/**/*"]
+}

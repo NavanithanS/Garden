@@ -1,54 +1,77 @@
 <?php if (!defined('APPLICATION')) exit(); ?>
-<h1><?php
-   if (is_object($this->Role))
-      echo T('Edit Role');
-   else
-      echo T('Add Role');
-?></h1>
 <?php
-echo $this->Form->Open();
-echo $this->Form->Errors();
+/* @var RoleController $this */
+echo heading($this->title(), '', '', [], '/dashboard/role');
+echo $this->Form->open();
+echo $this->Form->errors();
 ?>
-<ul>
-   <li>
-      <?php
-         echo $this->Form->Label('Role Name', 'Name');
-         echo $this->Form->TextBox('Name');
-      ?>
-   </li>
-   <li>
-      <?php
-         echo $this->Form->Label('Description', 'Description');
-         echo $this->Form->TextBox('Description', array('MultiLine' => TRUE));
-      ?>
-   </li>
-   <li>
-      <?php
-      echo $this->Form->CheckBox('PersonalInfo', T('RolePersonalInfo', "This role is personal info. Only users with permission to view personal info will see it."), array('value' => '1'));
-      ?>
-   </li>
-   <?php
-   $this->FireEvent('BeforeRolePermissions');
-   
-   echo $this->Form->Simple(
-      $this->Data('_ExtendedFields', array()),
-      array('Wrap' => array('', '')));   
-   
-   if (count($this->PermissionData) > 0) {
-      if ($this->Role && $this->Role->CanSession != '1') {
-         ?>
-         <li><p class="Warning"><?php echo T('Heads Up! This is a special role that does not allow active sessions. For this reason, the permission options have been limited to "view" permissions.'); ?></p></li>
-         <?php
-      }
-      ?>
-      <li class="RolePermissions">
-         <?php
-            echo '<strong>'.T('Check all permissions that apply to this role:').'</strong>';
-            echo $this->Form->CheckBoxGridGroups($this->PermissionData, 'Permission');
-         ?>
-      </li>
-   <?php
-   }
-   ?>
+<ul role="presentation">
+    <li class="form-group row" role="presentation">
+        <div class="label-wrap">
+            <?php echo $this->Form->label('Role Name', 'Name'); ?>
+        </div>
+        <div class="input-wrap">
+            <?php echo $this->Form->textBox('Name'); ?>
+        </div>
+    </li>
+    <li class="form-group row" role="presentation">
+        <div class="label-wrap">
+            <?php echo $this->Form->label('Description', 'Description'); ?>
+        </div>
+        <div class="input-wrap">
+            <?php echo $this->Form->textBox('Description', ['MultiLine' => true]); ?>
+        </div>
+    </li>
+    <li class="form-group row" role="presentation">
+        <div class="label-wrap">
+            <?php echo $this->Form->label('Default Type', 'Type');
+            echo '<div class="info">'.t('Select the default type for this role, if any.').'</div>'; ?>
+        </div>
+        <div class="input-wrap">
+            <?php echo $this->Form->dropDown('Type', $this->data('_Types'), ['IncludeNull' => true]); ?>
+        </div>
+    </li>
+    <?php if ($this->data('_roleSyncVisible')) { ?>
+    <li class="form-group row" role="presentation">
+        <div class="label-wrap-wide">
+            <?php echo $this->Form->label('SSO Role', 'Sync');
+            echo '<div class="info">'.t('SSO roles are always passed through SSO.').'</div>'; ?>
+        </div>
+        <div class="input-wrap-right">
+            <?php echo $this->Form->toggle('Sync', '', ['Value' => 'sso']); ?>
+        </div>
+    </li>
+    <?php } ?>
+    <li class="form-group row" role="presentation">
+        <div class="label-wrap-wide">
+            <?php echo $this->Form->label('Personal Info', 'PersonalInfo');
+            echo '<div class="info">'.t('RolePersonalInfo').'</div>'; ?>
+        </div>
+        <div class="input-wrap-right">
+            <?php echo $this->Form->toggle('PersonalInfo', '', ['value' => '1']); ?>
+        </div>
+    </li>
+    <?php
+    $this->fireEvent('BeforeRolePermissions');
+
+    echo $this->Form->simple(
+        $this->data('_ExtendedFields', []),
+        ['Wrap' => ['', '']]
+    ); ?>
 </ul>
-<?php echo $this->Form->Close('Save'); ?>
+
+<?php if (count($this->PermissionData) > 0) { ?>
+    <section>
+        <?php
+        echo subheading(t('Check all permissions that apply to this role:'));
+        if ($this->Role && $this->Role->CanSession != '1') { ?>
+            <div class="alert alert-warning padded"><?php echo t('Heads Up! This is a special role that does not allow active sessions. For this reason, the permission options have been limited to "view" permissions.'); ?></div>
+        <?php } ?>
+        <div class="RolePermissions">
+            <?php
+            echo $this->Form->checkBoxGridGroups($this->PermissionData, 'Permission');
+            ?>
+        </div>
+    </section>
+<?php } ?>
+<?php echo $this->Form->close('Save'); ?>

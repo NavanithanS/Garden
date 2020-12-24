@@ -1,222 +1,282 @@
-<?php if (!defined('APPLICATION')) exit();
-
+<?php
 /**
- * Regarding system
- * 
- * Handles relating external actions to comments and discussions. Flagging, Praising, Reporting, etc
+ * Regarding system.
  *
  * @author Tim Gunter <tim@vanillaforums.com>
- * @copyright 2003 Vanilla Forums, Inc
- * @license http://www.opensource.org/licenses/gpl-2.0.php GPL
- * @package Garden
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
+ * @package Core
  * @since 2.0
  */
 
-class Gdn_Regarding extends Gdn_Pluggable implements Gdn_IPlugin {
+/**
+ * Handles relating external actions to comments and discussions. Flagging, Praising, Reporting, etc.
+ */
+class Gdn_Regarding extends Gdn_Pluggable {
 
-   public function __construct() {
-      parent::__construct();
-   }
+    /**
+     *
+     */
+    public function __construct() {
+        parent::__construct();
+    }
 
-   /* With regard to... */
+    /* With regard to... */
 
-   /**
-    * Start a RegardingEntity for a comment
-    *
-    * Able to autoparent to its discussion owner if verfied.
-    *
-    * @param $CommentID int ID of the comment
-    * @param $Verify optional boolean whether or not to verify this. default true.
-    * @param $AutoParent optional boolean whether or not to try to autoparent. default true.
-    * @return Gdn_RegardingEntity
-    */
-   public function Comment($CommentID, $Verify = TRUE, $AutoParent = TRUE) {
-      $Regarding = $this->Regarding('Comment', $CommentID, $Verify);
-      if ($Verify && $AutoParent) $Regarding->AutoParent('discussion');
-      return $Regarding;
-   }
+    /**
+     * Start a RegardingEntity for a comment
+     *
+     * Able to autoparent to its discussion owner if verfied.
+     *
+     * @param $commentID int ID of the comment
+     * @param $verify optional boolean whether or not to verify this. default true.
+     * @param $autoParent optional boolean whether or not to try to autoparent. default true.
+     * @return Gdn_RegardingEntity
+     */
+    public function comment($commentID, $verify = true, $autoParent = true) {
+        $regarding = $this->regarding('Comment', $commentID, $verify);
+        if ($verify && $autoParent) {
+            $regarding->autoParent('discussion');
+        }
+        return $regarding;
+    }
 
-   /**
-    * Start a RegardingEntity for a discussion
-    *
-    * @param $DiscussionID int ID of the discussion
-    * @param $Verify optional boolean whether or not to verify this. default true.
-    * @return Gdn_RegardingEntity
-    */
-   public function Discussion($DiscussionID, $Verify = TRUE) {
-      return $this->Regarding('Discussion', $DiscussionID, $Verify);
-   }
+    /**
+     * Start a RegardingEntity for a discussion
+     *
+     * @param $discussionID int ID of the discussion
+     * @param $verify optional boolean whether or not to verify this. default true.
+     * @return Gdn_RegardingEntity
+     */
+    public function discussion($discussionID, $verify = true) {
+        return $this->regarding('Discussion', $discussionID, $verify);
+    }
 
-   /**
-    * Start a RegardingEntity for a conversation message
-    *
-    * Able to autoparent to its conversation owner if verfied.
-    *
-    * @param $MessageID int ID of the conversation message
-    * @param $Verify optional boolean whether or not to verify this. default true.
-    * @param $AutoParent optional boolean whether or not to try to autoparent. default true.
-    * @return Gdn_RegardingEntity
-    */
-   public function Message($MessageID, $Verify = TRUE, $AutoParent = TRUE) {
-      $Regarding = $this->Regarding('ConversationMessage', $MessageID, $Verify);
-      if ($Verify && $AutoParent) $Regarding->AutoParent('conversation');
-      return $Regarding;
-   }
+    /**
+     * Start a RegardingEntity for a conversation message
+     *
+     * Able to autoparent to its conversation owner if verfied.
+     *
+     * @param $messageID int ID of the conversation message
+     * @param $verify optional boolean whether or not to verify this. default true.
+     * @param $autoParent optional boolean whether or not to try to autoparent. default true.
+     * @return Gdn_RegardingEntity
+     */
+    public function message($messageID, $verify = true, $autoParent = true) {
+        $regarding = $this->regarding('ConversationMessage', $messageID, $verify);
+        if ($verify && $autoParent) {
+            $regarding->autoParent('conversation');
+        }
+        return $regarding;
+    }
 
-   /**
-    * Start a RegardingEntity for a conversation
-    *
-    * @param $ConversationID int ID of the conversation
-    * @param $Verify optional boolean whether or not to verify this. default true.
-    * @return Gdn_RegardingEntity
-    */
-   public function Conversation($ConversationID, $Verify = TRUE) {
-      return $this->Regarding('Conversation', $ConversationID, $Verify);
-   }
+    /**
+     * Start a RegardingEntity for a conversation
+     *
+     * @param $conversationID int ID of the conversation
+     * @param $verify optional boolean whether or not to verify this. default true.
+     * @return Gdn_RegardingEntity
+     */
+    public function conversation($conversationID, $verify = true) {
+        return $this->regarding('Conversation', $conversationID, $verify);
+    }
 
-   protected function Regarding($ThingType, $ThingID, $Verify = TRUE) {
-      $Verified = FALSE;
-      if ($Verify) {
-         $ModelName = ucfirst($ThingType).'Model';
+    /**
+     *
+     *
+     * @param $thingType
+     * @param $thingID
+     * @param bool $verify
+     * @return Gdn_RegardingEntity
+     * @throws Exception
+     */
+    protected function regarding($thingType, $thingID, $verify = true) {
+        $verified = false;
+        if ($verify) {
+            $modelName = ucfirst($thingType).'Model';
 
-         if (!class_exists($ModelName))
-            throw new Exception(sprintf(T("Could not find a model for %s objects."), ucfirst($ThingType)));
+            if (!class_exists($modelName)) {
+                throw new Exception(sprintf(t("Could not find a model for %s objects."), ucfirst($thingType)));
+            }
 
-         // If we can lookup this object, it is verified
-         $VerifyModel = new $ModelName;
-         $SourceElement = $VerifyModel->GetID($ThingID);
-         if ($SourceElement !== FALSE)
-            $Verified = TRUE;
+            // If we can lookup this object, it is verified
+            $verifyModel = new $modelName;
+            $sourceElement = $verifyModel->getID($thingID);
+            if ($sourceElement !== false) {
+                $verified = true;
+            }
 
-      } else {
-         $Verified = NULL;
-      }
+        } else {
+            $verified = null;
+        }
 
-      if ($Verified !== FALSE) {
-         $Regarding = new Gdn_RegardingEntity($ThingType, $ThingID);
-         if ($Verify)
-            $Regarding->VerifiedAs($SourceElement);
+        if ($verified !== false) {
+            $regarding = new Gdn_RegardingEntity($thingType, $thingID);
+            if ($verify) {
+                $regarding->verifiedAs($sourceElement);
+            }
 
-         return $Regarding;
-      }
+            return $regarding;
+        }
 
-      throw new Exception(sprintf(T("Could not verify entity relationship '%s(%d)' for Regarding call"), $ModelName, $ThingID));
-   }
+        throw new Exception(sprintf(t("Could not verify entity relationship '%s(%d)' for Regarding call"), $modelName, $thingID));
+    }
 
-   // Transparent forwarder to built-in starter methods
-   public function That() {
-      $Args = func_get_args();
-      $ThingType = array_shift($Args);
+    /**
+     * Transparent forwarder to built-in starter methods.
+     *
+     * @return mixed
+     */
+    public function that() {
+        $args = func_get_args();
+        $thingType = array_shift($args);
 
-      return call_user_func_array(array($this, $ThingType), $Args);
-   }
+        return call_user_func_array([$this, $thingType], $args);
+    }
 
-   /*
-    * Event system: Provide information for external hooks
-    */
-   
-   public function MatchEvent($RegardingType, $ForeignType, $ForeignID = NULL) {
-      $RegardingData = GetValue('RegardingData', $this->EventArguments);
-      
-      $FoundRegardingType = strtolower(GetValue('Type', $RegardingData));
-      if (!is_array($RegardingType))
-         $RegardingType = array($RegardingType);
-      $Found = FALSE;
-      foreach ($RegardingType as $RegardingTypeInstance)
-         if (fnmatch($RegardingTypeInstance, $FoundRegardingType))
-            $Found = TRUE;
-      if (!$Found) return FALSE;
-      
-      $FoundForeignType = strtolower(GetValue('ForeignType', $RegardingData));
-      if (!is_array($ForeignType))
-         $ForeignType = array($ForeignType);
-      $Found = FALSE;
-      foreach ($ForeignType as $ForeignTypeInstance)
-         if (fnmatch($ForeignTypeInstance, $FoundForeignType))
-            $Found = TRUE;
-      if (!$Found) return FALSE;
-      
-      if (!is_null($ForeignID)) {
-         $FoundForeignID = GetValue('ForeignID', $RegardingData);
-         if ($FoundForeignID != $ForeignID)
-            return FALSE;
-      }
-      
-      return $this->EventArguments;
-   }
+    /**
+     *  Event system: Provide information for external hooks.
+     *
+     * @param $regardingType
+     * @param $foreignType
+     * @param null $foreignID
+     * @return array|bool
+     */
+    public function matchEvent($regardingType, $foreignType, $foreignID = null) {
+        $regardingData = val('RegardingData', $this->EventArguments);
 
-   /*
-    * Event system: Hook into core events
-    */
+        $foundRegardingType = strtolower(getValue('Type', $regardingData));
+        if (!is_array($regardingType)) {
+            $regardingType = [$regardingType];
+        }
+        $found = false;
+        foreach ($regardingType as $regardingTypeInstance) {
+            if (fnmatch($regardingTypeInstance, $foundRegardingType)) {
+                $found = true;
+            }
+        }
+        if (!$found) {
+            return false;
+        }
 
-   // Cache regarding data for displayed comments
-//   public function DiscussionController_BeforeDiscussionRender_Handler($Sender) {
-//      if (GetValue('RegardingCache', $Sender, NULL) != NULL) return;
+        $foundForeignType = strtolower(val('ForeignType', $regardingData));
+        if (!is_array($foreignType)) {
+            $foreignType = [$foreignType];
+        }
+        $found = false;
+        foreach ($foreignType as $foreignTypeInstance) {
+            if (fnmatch($foreignTypeInstance, $foundForeignType)) {
+                $found = true;
+            }
+        }
+        if (!$found) {
+            return false;
+        }
+
+        if (!is_null($foreignID)) {
+            $foundForeignID = val('ForeignID', $regardingData);
+            if ($foundForeignID != $foreignID) {
+                return false;
+            }
+        }
+
+        return $this->EventArguments;
+    }
+
+    /*
+     * Event system: Hook into core events
+     */
+
+    // Cache regarding data for displayed comments
+//   public function discussionController_BeforeDiscussionRender_Handler($Sender) {
+//      if (getValue('RegardingCache', $Sender, NULL) != NULL) return;
 //
-//      $Comments = $Sender->Data('Comments');
+//      $Comments = $Sender->data('Comments');
 //      $CommentIDList = array();
 //      if ($Comments && $Comments instanceof Gdn_DataSet) {
-//         $Comments->DataSeek(-1);
-//         while ($Comment = $Comments->NextRow()) {
+//         $Comments->dataSeek(-1);
+//         while ($Comment = $Comments->nextRow()) {
 //            if (!isset($Comment->CommentID) || !is_numeric($Comment->CommentID))
 //               continue;
 //            $CommentIDList[] = $Comment->CommentID;
 //         }
 //      }
-//      $this->CacheRegarding($Sender, 'discussion', $Sender->Discussion->DiscussionID, 'comment', $CommentIDList);
+//      $this->cacheRegarding($Sender, 'discussion', $Sender->Discussion->DiscussionID, 'comment', $CommentIDList);
 //   }
 
-   protected function CacheRegarding($Sender, $ParentType, $ParentID, $ForeignType, $ForeignIDs) {
+    /**
+     *
+     *
+     * @param $sender
+     * @param $parentType
+     * @param $parentID
+     * @param $foreignType
+     * @param $foreignIDs
+     */
+    protected function cacheRegarding($sender, $parentType, $parentID, $foreignType, $foreignIDs) {
+        $sender->RegardingCache = [];
+        $childRegardingData = $this->regardingModel()->getAll($foreignType, $foreignIDs);
+        $parentRegardingData = $this->regardingModel()->get($parentType, $parentID);
 
-      $Sender->RegardingCache = array();
+        /*
+              $MediaArray = array();
+              if ($MediaData !== FALSE) {
+                 $MediaData->dataSeek(-1);
+                 while ($Media = $MediaData->nextRow()) {
+                    $MediaArray[$Media->ForeignTable.'/'.$Media->ForeignID][] = $Media;
+                    $this->MediaCacheById[GetValue('MediaID',$Media)] = $Media;
+                 }
+              }
+        */
 
-      $ChildRegardingData = $this->RegardingModel()->GetAll($ForeignType, $ForeignIDs);
-      $ParentRegardingData = $this->RegardingModel()->Get($ParentType, $ParentID);
+        $this->RegardingCache = [];
+    }
 
-/*
-      $MediaArray = array();
-      if ($MediaData !== FALSE) {
-         $MediaData->DataSeek(-1);
-         while ($Media = $MediaData->NextRow()) {
-            $MediaArray[$Media->ForeignTable.'/'.$Media->ForeignID][] = $Media;
-            $this->MediaCacheById[GetValue('MediaID',$Media)] = $Media;
-         }
-      }
-*/
+    /**
+     * @param DiscussionController $sender
+     */
+    public function beforeCommentBody($sender) {
+        $context = strtolower($sender->EventArguments['Type']);
 
-      $this->RegardingCache = array();
-   }
+        $regardingID = val('RegardingID', $sender->EventArguments['Object'], null);
+        if (is_null($regardingID) || $regardingID < 0) {
+            return;
+        }
 
-   public function DiscussionController_BeforeCommentBody_Handler($Sender) {
-      $Context = strtolower($Sender->EventArguments['Type']);
+        try {
+            $regardingData = $this->regardingModel()->getID($regardingID);
+            $entityModelName = ucfirst(val('ForeignType', $regardingData)).'Model';
+            if (class_exists($entityModelName)) {
+                $entityModel = new $entityModelName();
+                $entity = $entityModel->getID(val('ForeignID', $regardingData));
+                $this->EventArguments = array_merge($this->EventArguments, [
+                    'EventSender' => $sender,
+                    'Entity' => $entity,
+                    'RegardingData' => $regardingData,
+                    'Options' => null
+                ]);
+                $this->fireEvent('RegardingDisplay');
+            }
+        } catch (Exception $e) {
+        }
+    }
 
-      $RegardingID = GetValue('RegardingID', $Sender->EventArguments['Object'], NULL);
-      if (is_null($RegardingID) || $RegardingID < 0) return;
+    /**
+     *
+     *
+     * @return RegardingModel
+     */
+    public function regardingModel() {
+        static $regardingModel = null;
+        if (is_null($regardingModel)) {
+            $regardingModel = new RegardingModel();
+        }
+        return $regardingModel;
+    }
 
-      try {
-         $RegardingData = $this->RegardingModel()->GetID($RegardingID);
-         $EntityModelName = ucfirst(GetValue('ForeignType',$RegardingData)).'Model';
-         if (class_exists($EntityModelName)) {
-            $EntityModel = new $EntityModelName();
-            $Entity = $EntityModel->GetID(GetValue('ForeignID',$RegardingData));
-            $this->EventArguments = array_merge($this->EventArguments,array(
-               'EventSender'     => $Sender,
-               'Entity'          => $Entity,
-               'RegardingData'   => $RegardingData,
-               'Options'         => NULL
-            ));
-            $this->FireEvent('RegardingDisplay');
-         }
-      } catch (Exception $e) {}
-   }
-
-   public function RegardingModel() {
-      static $RegardingModel = NULL;
-      if (is_null($RegardingModel))
-         $RegardingModel = new RegardingModel();
-      return $RegardingModel;
-   }
-
-   public function Setup(){}
-
+    /**
+     * Do nothing.
+     */
+    public function setup() {
+    }
 }

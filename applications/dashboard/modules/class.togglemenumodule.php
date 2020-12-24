@@ -1,57 +1,86 @@
-<?php if (!defined('APPLICATION')) exit();
-/*
-Copyright 2008, 2009 Vanilla Forums Inc.
-This file is part of Garden.
-Garden is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-Garden is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
-You should have received a copy of the GNU General Public License along with Garden.  If not, see <http://www.gnu.org/licenses/>.
-Contact Vanilla Forums Inc. at support [at] vanillaforums [dot] com
-*/
+<?php
+/**
+ * Toggle menu module.
+ *
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
+ * @package Dashboard
+ * @since 2.0
+ */
 
+/**
+ * Class ToggleMenuModule.
+ */
 class ToggleMenuModule extends Gdn_Module {
-   
-   private $_Labels = array();
-   public function AddLabel($Name, $Code = '', $Url = '') {
-      if ($Code == '')
-         $Code = Gdn_Format::Url(ucwords(trim(Gdn_Format::PlainText($Name))));
 
-      $this->_Labels[] = array('Name' => $Name, 'Code' => $Code, 'Url' => $Url);
-   }
-   
-   private $_CurrentLabelCode = FALSE;
-   public function CurrentLabelCode($Label = '') {
-      if ($Label != '')
-         $this->_CurrentLabelCode = $Label;
-      
-      // If the current code hasn't been assigned, use the first available label
-      if (!$this->_CurrentLabelCode && count($this->_Labels) > 0)
-         return $this->_Labels[0]['Code'];
+    /** @var array  */
+    private $_Labels = [];
 
-      return $this->_CurrentLabelCode;
-   }
-   
-   public function ToString() {
-      $Return = '<ul class="FilterMenu ToggleMenu">';
-      foreach ($this->_Labels as $Label) {
-         $Url = GetValue('Url', $Label, '');
-         if ($Url == '')
-            $Url = '#';
-         
-         $Name = GetValue('Name', $Label, '');
-         $Code = GetValue('Code', $Label, '');
-         $Active = strcasecmp($Code, $this->CurrentLabelCode()) == 0;
-         $CssClass = 'Handle-'.$Code;
-         $AnchorClass = '';
-         if ($Active) {
-            $CssClass .= ' Active';
-            $AnchorClass = 'TextColor';
-         }
+    /** @var bool  */
+    private $_CurrentLabelCode = false;
 
-         $Return .= '<li class="'.$CssClass.'">';
-            $Return .= Anchor($Name, $Url, $AnchorClass);
-         $Return .= '</li>';
-      }
-      $Return .= '</ul>';   
-      return $Return;
-   }
+    /**
+     *
+     *
+     * @param $name
+     * @param string $code
+     * @param string $url
+     */
+    public function addLabel($name, $code = '', $url = '') {
+        if ($code == '') {
+            $code = Gdn_Format::url(ucwords(trim(Gdn_Format::plainText($name))));
+        }
+
+        $this->_Labels[] = ['Name' => $name, 'Code' => $code, 'Url' => $url];
+    }
+
+    /**
+     *
+     *
+     * @param string $label
+     * @return bool|string
+     */
+    public function currentLabelCode($label = '') {
+        if ($label != '') {
+            $this->_CurrentLabelCode = $label;
+        }
+
+        // If the current code hasn't been assigned, use the first available label
+        if (!$this->_CurrentLabelCode && count($this->_Labels) > 0) {
+            return $this->_Labels[0]['Code'];
+        }
+
+        return $this->_CurrentLabelCode;
+    }
+
+    /**
+     *
+     *
+     * @return string
+     */
+    public function toString() {
+        $return = '<ul class="FilterMenu ToggleMenu">';
+        foreach ($this->_Labels as $label) {
+            $url = val('Url', $label, '');
+            if ($url == '') {
+                $url = '#';
+            }
+
+            $name = val('Name', $label, '');
+            $code = val('Code', $label, '');
+            $active = strcasecmp($code, $this->currentLabelCode()) == 0;
+            $cssClass = 'Handle-'.$code;
+            $anchorClass = '';
+            if ($active) {
+                $cssClass .= ' Active';
+                $anchorClass = 'TextColor';
+            }
+
+            $return .= '<li class="'.$cssClass.'">';
+            $return .= anchor($name, $url, $anchorClass);
+            $return .= '</li>';
+        }
+        $return .= '</ul>';
+        return $return;
+    }
 }

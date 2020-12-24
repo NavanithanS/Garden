@@ -1,36 +1,46 @@
 <?php if (!defined('APPLICATION')) exit();
-$User = GetValue('User', Gdn::Controller());
-if (!$User && Gdn::Session()->IsValid()) {
-   $User = Gdn::Session()->User;
+$dataDriven = \Gdn::themeFeatures()->useDataDrivenTheme();
+$User = val('User', Gdn::controller());
+if (!$User && Gdn::session()->isValid()) {
+    $User = Gdn::session()->User;
 }
 
-if (!$User)
-   return;
+if (!$User) {
+    return;
+}
 
 $Photo = $User->Photo;
+if ($Photo) {
+    $Photo = (isUrl($Photo)) ? $Photo : Gdn_Upload::url(changeBasename($Photo, 'p%s'));
+    $PhotoAlt = t('Avatar');
+} else {
+    $Photo = UserModel::getDefaultAvatarUrl($User, 'profile');
+    $PhotoAlt = t('Default Avatar');
+}
 
 if ($User->Banned) {
-   $BannedPhoto = C('Garden.BannedPhoto', 'http://cdn.vanillaforums.com/images/banned_large.png');
-   if ($BannedPhoto)
-      $Photo = Gdn_Upload::Url($BannedPhoto);
+    $BannedPhoto = c('Garden.BannedPhoto', 'https://images.v-cdn.net/banned_large.png');
+    if ($BannedPhoto) {
+        $Photo = Gdn_Upload::url($BannedPhoto);
+    }
 }
-   
-if ($Photo) {
-?>
-   <div class="Photo PhotoWrap PhotoWrapLarge <?php echo GetValue('_CssClass', $User); ?>">
-      <?php
-      if (IsUrl($Photo))
-         $Img = Img($Photo, array('class' => 'ProfilePhotoLarge'));
-      else
-         $Img = Img(Gdn_Upload::Url(ChangeBasename($Photo, 'p%s')), array('class' => 'ProfilePhotoLarge'));
-         
-      if (!$User->Banned && C('Garden.Profile.EditPhotos', TRUE) && (Gdn::Session()->UserID == $User->UserID || Gdn::Session()->CheckPermission('Garden.Users.Edit')))
-         echo Anchor(Wrap(T('Change Picture')), '/profile/picture?userid='.$User->UserID, 'ChangePicture');
-      
-      echo $Img;
-      ?>
-   </div>
-<?php } else if ($User->UserID == Gdn::Session()->UserID || Gdn::Session()->CheckPermission('Garden.Users.Edit')) { ?>
-   <div class="Photo"><?php echo Anchor(T('Add a Profile Picture'), '/profile/picture?userid='.$User->UserID, 'AddPicture BigButton'); ?></div>
+
+if ($Photo) : ?>
+    <div class="Photo PhotoWrap PhotoWrapLarge <?php echo val('_CssClass', $User); ?>">
+        <?php
+        $canEditPhotos = Gdn::session()->checkRankedPermission(c('Garden.Profile.EditPhotos', true)) || checkPermission('Garden.Users.Edit');
+
+        if (!$User->Banned && $canEditPhotos && (Gdn::session()->UserID == $User->UserID || checkPermission('Garden.Users.Edit'))) {
+            $contents = ($dataDriven ? '<span class="icon icon-camera"></span>' : '').t('Change Icon');
+            echo anchor(wrap($contents, "span", ["class" => "ChangePicture-Text"]), '/profile/picture?userid='.$User->UserID, 'ChangePicture Popup', ["aria-label" => t("Change Picture")]);
+        }
+
+        echo img($Photo, ['class' => 'ProfilePhotoLarge', 'alt' => $PhotoAlt]);
+        ?>
+    </div>
+<?php elseif ($User->UserID == Gdn::session()->UserID || Gdn::session()->checkPermission('Garden.Users.Edit')) : ?>
+    <div class="Photo">
+        <?php echo anchor(t('Add a Profile Picture'), '/profile/picture?userid='.$User->UserID, 'AddPicture BigButton'); ?>
+    </div>
 <?php
-}
+endif;

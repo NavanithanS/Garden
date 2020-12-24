@@ -1,244 +1,248 @@
-<?php if (!defined('APPLICATION')) exit();
-/*
-Copyright 2008, 2009 Vanilla Forums Inc.
-This file is part of Garden.
-Garden is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-Garden is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
-You should have received a copy of the GNU General Public License along with Garden.  If not, see <http://www.gnu.org/licenses/>.
-Contact Vanilla Forums Inc. at support [at] vanillaforums [dot] com
-*/
+<?php
+/**
+ * MorePager module.
+ *
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
+ * @package Dashboard
+ * @since 2.0
+ */
 
 /**
  * Builds a pager control related to a dataset.
  */
-class MorePagerModule extends Gdn_Module {
+class MorePagerModule extends PagerModule {
+
+    /** @var int The id applied to the div tag that contains the pager. */
+    public $ClientID;
+
+    /** @var string The name of the stylesheet class to be applied to the pager. Default is 'Pager'. */
+    public $CssClass;
+
+    /** @var string Translation code to be used for "more" link. */
+    public $MoreCode;
+
+    /**
+     * @var string If there are no pages to page through, this string will be returned in
+     * place of the pager. Default is an empty string.
+     */
+    public $PagerEmpty;
+
+    /**
+     * @var string The xhtml code that should wrap around the pager link.
+     *  ie. '<div %1$s>%2$s</div>';
+     * where %1$s represents id and class attributes (if defined by
+     * $this->ClientID and $this->CssClass) and %2$s represents the pager link.
+     */
+    public $Wrapper;
+
+    /** @var string Translation code to be used for "less" link. */
+    public $LessCode;
+
+    /** @var int The number of records being displayed on a single page of data. Default is 30. */
+    public $Limit;
+
+    /** @var int The total number of records in the dataset. */
+    public $TotalRecords;
+
+    /** @var string The string to contain the record offset. ie. /controller/action/%s/ */
+    public $Url;
+
+    /** @var int The first record of the current page (the dataset offset). */
+    public $Offset;
+
+    /**
+     * MorePagerModule constructor.
+     *
+     * @param string $sender
+     */
+    public function __construct($sender = '') {
+        parent::__construct($sender);
+        $this->ClientID = '';
+        $this->CssClass = 'MorePager Foot';
+        $this->Offset = 0;
+        $this->Limit = 30;
+        $this->TotalRecords = 0;
+        $this->Wrapper = '<div %1$s>%2$s</div>';
+        $this->PagerEmpty = '';
+        $this->MoreCode = 'More';
+        $this->LessCode = 'Newer';
+        $this->Url = '/controller/action/{Page}/';
+        $this->_PropertiesDefined = false;
+        $this->_Totalled = false;
+        $this->_LastOffset = 0;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function assetTarget() {
+        return false;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function configure($offset, $limit, $totalRecords, $url, $forceConfigure = false) {
+        if ($this->_PropertiesDefined === false || $forceConfigure === true) {
+            $this->Url = $url;
+
+            $this->Offset = $offset;
+            $this->Limit = is_numeric($limit) && $limit > 0 ? $limit : $this->Limit;
+            $this->TotalRecords = is_numeric($totalRecords) ? $totalRecords : 0;
+            $this->_Totalled = ($this->TotalRecords >= $this->Limit) ? false : true;
+            $this->_LastOffset = $this->Offset + $this->Limit;
+            if ($this->_LastOffset > $this->TotalRecords) {
+                $this->_LastOffset = $this->TotalRecords;
+            }
+
+            $this->_PropertiesDefined = true;
+        }
+    }
 
    /**
-    * The id applied to the div tag that contains the pager.
-    */
-   public $ClientID;
-   
-   /**
-    * The name of the stylesheet class to be applied to the pager. Default is
-    * 'Pager';
-    */
-   public $CssClass;
-
-   /**
-    * Translation code to be used for "more" link.
-    */
-   public $MoreCode;
-
-   /**
-    * If there are no pages to page through, this string will be returned in
-    * place of the pager. Default is an empty string.
-    */
-   public $PagerEmpty;
-   
-   /**
-    * The xhtml code that should wrap around the pager link.
-    *  ie. '<div %1$s>%2$s</div>';
-    * where %1$s represents id and class attributes (if defined by
-    * $this->ClientID and $this->CssClass) and %2$s represents the pager link.
-    */
-   public $Wrapper;
-
-   /**
-    * Translation code to be used for "less" link.
-    */
-   public $LessCode;
-
-   /**
-    * The number of records being displayed on a single page of data. Default
-    * is 30.
-    */
-   public $Limit;
-   
-   /**
-    * The total number of records in the dataset.
-    */
-   public $TotalRecords;
-   
-   /**
-    * The string to contain the record offset. ie. /controller/action/%s/
-    */
-   public $Url;
-   
-   /**
-    * The first record of the current page (the dataset offset).
-    */
-   private $Offset;
-   
-   /**
-    * The last offset of the current page. (ie. Offset to LastOffset of TotalRecords)
-    */
-   private $_LastOffset;
-   
-   /**
-    * Certain properties are required to be defined before the pager can build
-    * itself. Once they are created, this property is set to true so they are
-    * not needlessly recreated.
-    */
-   private $_PropertiesDefined;
-   
-   /**
-    * A boolean value indicating if the total number of records is known or
-    * not. Retrieving this number can be a costly database query, so sometimes
-    * it is not retrieved and simple "next/previous" links are displayed
-    * instead. Default is FALSE, meaning that the simple pager is displayed.
-    */
-   private $_Totalled;
-
-   public function __construct($Sender = '') {
-      $this->ClientID = '';
-      $this->CssClass = 'MorePager Foot';
-      $this->Offset = 0;
-      $this->Limit = 30;
-      $this->TotalRecords = 0;
-      $this->Wrapper = '<div %1$s>%2$s</div>';
-      $this->PagerEmpty = '';
-      $this->MoreCode = 'More';
-      $this->LessCode = 'Newer';
-      $this->Url = '/controller/action/{Page}/';
-      $this->_PropertiesDefined = FALSE;
-      $this->_Totalled = FALSE;
-      $this->_LastOffset = 0;
-      parent::__construct($Sender);
-   }
-
-   function AssetTarget() {
-      return FALSE;
-   }
-
-   /**
-    * Define all required parameters to create the Pager and PagerDetails.
-    */
-   public function Configure($Offset, $Limit, $TotalRecords, $Url, $ForceConfigure = FALSE) {
-      if ($this->_PropertiesDefined === FALSE || $ForceConfigure === TRUE) {
-         $this->Url = $Url;
-
-         $this->Offset = $Offset;         
-         $this->Limit = is_numeric($Limit) && $Limit > 0 ? $Limit : $this->Limit;
-         $this->TotalRecords = is_numeric($TotalRecords) ? $TotalRecords : 0;
-         $this->_Totalled = ($this->TotalRecords >= $this->Limit) ? FALSE : TRUE;
-         $this->_LastOffset = $this->Offset + $this->Limit;
-         if ($this->_LastOffset > $this->TotalRecords)
-            $this->_LastOffset = $this->TotalRecords;
-               
-         $this->_PropertiesDefined = TRUE;
-      }
-   }
-   
-   // Builds a string with information about the page list's current position (ie. "1 to 15 of 56").
-   // Returns the built string.
-   public function Details() {
-      if ($this->_PropertiesDefined === FALSE)
-         trigger_error(ErrorMessage('You must configure the pager with $Pager->Configure() before retrieving the pager details.', 'MorePager', 'Details'), E_USER_ERROR);
-         
-      $Details = FALSE;
-      if ($this->TotalRecords > 0) {
-         if ($this->_Totalled === TRUE) {
-            $Details = self::FormatUrl(T('%s$1 to %s$2 of %s$3'), $this->Offset + 1, $this->_LastOffset, $this->TotalRecords);
-         } else {
-            $Details = self::FormatUrl(T('%s$1 to %s$2'), $this->Offset, $this->_LastOffset);
-         }
-      }
-      return $Details;
-   }
-   
-   /**
-    * Whether or not this is the first page of the pager.
+    * Builds a string with information about the page list's current position (ie. "1 to 15 of 56").
     *
-    * @return bool True if this is the first page.
+    * @param string $formatString Not used.
+    * @return string Built string.
     */
-   public function FirstPage() {
-      $Result = $this->Offset == 0;
-      return $Result;
-   }
+    public function details($formatString = '') {
+        if ($this->_PropertiesDefined === false) {
+            trigger_error('You must configure the pager with $Pager->configure() before retrieving the pager details.', E_USER_ERROR);
+        }
 
-   public static function FormatUrl($Url, $Offset, $Limit = '') {
-      // Check for new style page.
-      if (strpos($Url, '{Page}') !== FALSE || strpos($Url, '{Offset}') !== FALSE) {
-         $Page = PageNumber($Offset, $Limit, TRUE);
-         return str_replace(array('{Offset}', '{Page}', '{Size}'), array($Offset, $Page, $Limit), $Url);
-      } else
-         return self::FormatUrl($Url, $Page, $Limit);
+        $details = false;
+        if ($this->TotalRecords > 0) {
+            if ($this->_Totalled === true) {
+                $details = self::formatUrl(t('%1$s to %2$s of %3$s'), $this->Offset + 1, $this->_LastOffset, $this->TotalRecords);
+            } else {
+                $details = self::formatUrl(t('%1$s to %2$s'), $this->Offset, $this->_LastOffset);
+            }
+        }
+        return $details;
+    }
 
-   }
+    /**
+     * Whether or not this is the first page of the pager.
+     *
+     * @return bool True if this is the first page.
+     */
+    public function firstPage() {
+        $result = $this->Offset == 0;
+        return $result;
+    }
 
-   /**
-    * Whether or not this is the last page of the pager.
-    *
-    * @return bool True if this is the last page.
-    */
-   public function LastPage() {
-      $Result = $this->Offset + $this->Limit >= $this->TotalRecords;
-      return $Result;
-   }
+    /**
+     * Format a URL for the pager.
+     *
+     * @param string $url
+     * @param int $offset
+     * @param int $limit
+     * @param int $count
+     * @return string
+     * @deprecated This method differs from its parent. Please consider it for use in this class only.
+     */
+    public static function formatUrl($url, $offset, $limit = 0, $count = 0) {
+        $page = pageNumber($offset, $limit, true);
+        $data = [
+            'offset' => $offset,
+            'limit'  => $limit,
+            'page' => $page,
+            'from' => $offset + 1,
+            'to' => $offset + $limit,
+            'count' => $count,
+        ];
+        $r = preg_replace_callback('`{(offset|page|size|from|to|count|pagecount)}`i', function ($m) use ($data) {
+            return $data[strtolower($m[1])] ?? '';
+        }, $url, -1, $matches);
 
-   /**
-    * Returns the "show x more (or less) items" link.
-    *
-    * @param string The type of link to return: more or less
-    */
-   public function ToString($Type = 'more') {
-      if ($this->_PropertiesDefined === FALSE)
-         trigger_error(ErrorMessage('You must configure the pager with $Pager->Configure() before retrieving the pager.', 'MorePager', 'GetSimple'), E_USER_ERROR);
-      
-      // Urls with url-encoded characters will break sprintf, so we need to convert them for backwards compatibility.
-      $this->Url = str_replace(array('%1$s', '%2$s', '%s'), array('{Offset}', '{Size}', '{Offset}'), $this->Url);
+        // Check for new style page.
+        if ($matches === 0) {
+            return sprintf($url, $offset + 1, $offset + $limit, $count);
+        } else {
+            return $r;
+        }
+    }
 
-      $Pager = '';
-      if ($Type == 'more') {
-         $ClientID = $this->ClientID == '' ? '' : $this->ClientID . 'More';
-         if ($this->Offset + $this->Limit >= $this->TotalRecords) {
-            $Pager = ''; // $this->Offset .' + '. $this->Limit .' >= '. $this->TotalRecords;
-         } else {
-            $ActualRecordsLeft = $RecordsLeft = $this->TotalRecords - $this->_LastOffset;
-            if ($RecordsLeft > $this->Limit)
-               $RecordsLeft = $this->Limit;
-               
-            $NextOffset = $this->Offset + $this->Limit;
+    /**
+     * Whether or not this is the last page of the pager.
+     *
+     * @return bool True if this is the last page.
+     */
+    public function lastPage() {
+        $result = $this->Offset + $this->Limit >= $this->TotalRecords;
+        return $result;
+    }
 
-            $Pager .= Anchor(
-               sprintf(T($this->MoreCode), $ActualRecordsLeft),
-               self::FormatUrl($this->Url, $NextOffset, $this->Limit),
-               '',
-               array('rel' => 'nofollow')
-            );
-         }
-      } else if ($Type == 'less') {
-         $ClientID = $this->ClientID == '' ? '' : $this->ClientID . 'Less';
-         if ($this->Offset <= 0) {
-            $Pager = '';
-         } else {
-            $RecordsBefore = $this->Offset;
-            if ($RecordsBefore > $this->Limit)
-               $RecordsBefore = $this->Limit;
-               
-            $PreviousOffset = $this->Offset - $this->Limit;
-            if ($PreviousOffset < 0)
-               $PreviousOffset = 0;
-               
-            $Pager .= Anchor(
-               sprintf(T($this->LessCode), $this->Offset),
-               self::FormatUrl($this->Url, $PreviousOffset, $RecordsBefore),
-               '',
-               array('rel' => 'nofollow')
-            );
-         }
-      }
-      if ($Pager == '')
-         return $this->PagerEmpty;
-      else
-         return sprintf($this->Wrapper, Attribute(array('id' => $ClientID, 'class' => $this->CssClass)), $Pager);
-   }
-   
-   /** 
-    * Are there more pages after the current one?
-    */
-   public function HasMorePages() {
-      return $this->TotalRecords > $this->Offset + $this->Limit;
-   }
-   
+    /**
+     * Returns the "show x more (or less) items" link.
+     *
+     * @param string $type The type of link to return: more or less.
+     * @param array $attributes Extra attributes.
+     * @return string
+     */
+    public function toString($type = 'more', $attributes = []) {
+        if ($this->_PropertiesDefined === false) {
+            trigger_error('You must configure the pager with $Pager->configure() before retrieving the pager.', E_USER_ERROR);
+        }
+
+        // Urls with url-encoded characters will break sprintf, so we need to convert them for backwards compatibility.
+        $this->Url = str_replace(['%1$s', '%2$s', '%s'], ['{Offset}', '{Size}', '{Offset}'], $this->Url);
+
+        $pager = '';
+        if ($type == 'more') {
+            $clientID = $this->ClientID == '' ? '' : $this->ClientID.'More';
+            if ($this->Offset + $this->Limit >= $this->TotalRecords) {
+                $pager = ''; // $this->Offset .' + '. $this->Limit .' >= '. $this->TotalRecords;
+            } else {
+                $actualRecordsLeft = $recordsLeft = $this->TotalRecords - $this->_LastOffset;
+                if ($recordsLeft > $this->Limit) {
+                    $recordsLeft = $this->Limit;
+                }
+
+                $nextOffset = $this->Offset + $this->Limit;
+
+                $pager .= anchor(
+                    sprintf(t($this->MoreCode), $actualRecordsLeft),
+                    self::formatUrl($this->Url, $nextOffset, $this->Limit),
+                    '',
+                    ['rel' => 'nofollow']
+                );
+            }
+        } elseif ($type == 'less') {
+            $clientID = $this->ClientID == '' ? '' : $this->ClientID.'Less';
+            if ($this->Offset <= 0) {
+                $pager = '';
+            } else {
+                $recordsBefore = $this->Offset;
+                if ($recordsBefore > $this->Limit) {
+                    $recordsBefore = $this->Limit;
+                }
+
+                $previousOffset = $this->Offset - $this->Limit;
+                if ($previousOffset < 0) {
+                    $previousOffset = 0;
+                }
+
+                $pager .= anchor(
+                    sprintf(t($this->LessCode), $this->Offset),
+                    self::formatUrl($this->Url, $previousOffset, $recordsBefore),
+                    '',
+                    ['rel' => 'nofollow']
+                );
+            }
+        }
+        if ($pager == '') {
+            return $this->PagerEmpty;
+        } else {
+            return sprintf($this->Wrapper, attribute(['id' => $clientID, 'class' => $this->CssClass]), $pager);
+        }
+    }
+
+    /**
+     * Are there more pages after the current one?
+     */
+    public function hasMorePages() {
+        return $this->TotalRecords > $this->Offset + $this->Limit;
+    }
 }

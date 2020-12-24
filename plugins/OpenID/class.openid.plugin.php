@@ -1,239 +1,336 @@
-<?php if (!defined('APPLICATION')) exit();
-/*
-Copyright 2008, 2009 Vanilla Forums Inc.
-This file is part of Garden.
-Garden is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-Garden is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
-You should have received a copy of the GNU General Public License along with Garden.  If not, see <http://www.gnu.org/licenses/>.
-Contact Vanilla Forums Inc. at support [at] vanillaforums [dot] com
-*/
+<?php
+/**
+ * OpenID Plugin.
+ *
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license http://www.opensource.org/licenses/gpl-2.0.php GNU GPL v2
+ * @package OpenID
+ */
 
-// Define the plugin:
-$PluginInfo['OpenID'] = array(
-	'Name' => 'OpenID',
-   'Description' => 'Allows users to sign in with OpenID. Must be enabled before using &lsquo;Google Sign In&rsquo; plugin.',
-   'Version' => '1.0',
-   'RequiredApplications' => array('Vanilla' => '2.0.14'),
-   'RequiredTheme' => FALSE,
-   'RequiredPlugins' => FALSE,
-	'MobileFriendly' => TRUE,
-//   'SettingsUrl' => '/dashboard/plugin/openid',
-   'SettingsPermission' => 'Garden.Settings.Manage',
-   'HasLocale' => TRUE,
-   'RegisterPermissions' => FALSE,
-   'Author' => "Todd Burry",
-   'AuthorEmail' => 'todd@vanillaforums.com',
-   'AuthorUrl' => 'http://www.vanillaforums.org/profile/todd'
-);
-
-// 0.2 - Remove redundant enable toggle (2012-03-08 Lincoln)
-
+/**
+ * Class OpenIDPlugin
+ */
 class OpenIDPlugin extends Gdn_Plugin {
-   public static $ProviderKey = 'OpenID';
 
-   /// Methods ///
+    /** @var string  */
+    public static $ProviderKey = 'OpenID';
 
-   protected function _AuthorizeHref($Popup = FALSE) {
-      $Url = Url('/entry/openid', TRUE);
-      $UrlParts = explode('?', $Url);
-      parse_str(GetValue(1, $UrlParts, ''), $Query);
+    /**
+     *
+     *
+     * @param bool $popup
+     * @return string
+     */
+    protected function _AuthorizeHref($popup = false) {
+        $url = url('/entry/openid', true);
+        $urlParts = explode('?', $url);
+        parse_str(val(1, $urlParts, ''), $query);
 
-      $Path = '/'.Gdn::Request()->Path();
-      $Query['Target'] = GetValue('Target', $_GET, $Path ? $Path : '/');
+        $path = '/'.Gdn::request()->path();
+        $query['Target'] = val('Target', $_GET, $path ? $path : '/');
 
-      if (isset($_GET['Target']))
-         $Query['Target'] = $_GET['Target'];
-      if ($Popup)
-         $Query['display'] = 'popup';
+        if (isset($_GET['Target'])) {
+            $query['Target'] = $_GET['Target'];
+        }
+        if ($popup) {
+            $query['display'] = 'popup';
+        }
 
-      $Result = $UrlParts[0].'?'.http_build_query($Query);
-      return $Result;
-   }
+        $result = $urlParts[0].'?'.http_build_query($query);
+        return $result;
+    }
 
-   /**
-    * @return LightOpenID
-    */
-   public function GetOpenID() {
-      if (get_magic_quotes_gpc()) {
-         foreach ($_GET as $Name => $Value) {
-            $_GET[$Name] = stripslashes($Value);
-         }
-      }
+    /**
+     *
+     *
+     * @return LightOpenID
+     */
+    public function getOpenID() {
+        $OpenID = new LightOpenID();
 
-      $OpenID = new LightOpenID();
-
-      if (isset($_GET['url']))
-         $OpenID->identity = $_GET['url'];
-
-      $Url = Url('/entry/connect/openid', TRUE);
-      $UrlParts = explode('?', $Url);
-      parse_str(GetValue(1, $UrlParts, ''), $Query);
-      $Query = array_merge($Query, ArrayTranslate($_GET, array('display', 'Target')));
-
-      $OpenID->returnUrl = $UrlParts[0].'?'.http_build_query($Query);
-      $OpenID->required = array('contact/email', 'namePerson/first', 'namePerson/last', 'pref/language');
-
-      $this->EventArguments['OpenID'] = $OpenID;
-      $this->FireEvent('GetOpenID');
-
-      return $OpenID;
-   }
-
-   /**
-    * Act as a mini dispatcher for API requests to the plugin app
-    */
-//   public function PluginController_OpenID_Create($Sender) {
-//      $Sender->Permission('Garden.Settings.Manage');
-//		$this->Dispatch($Sender, $Sender->RequestArgs);
-//   }
-
-//   public function Controller_Toggle($Sender) {
-//      $this->AutoToggle($Sender);
-//   }
-
-   public function AuthenticationController_Render_Before($Sender, $Args) {
-      if (isset($Sender->ChooserList)) {
-         $Sender->ChooserList['openid'] = 'OpenID';
-      }
-      if (is_array($Sender->Data('AuthenticationConfigureList'))) {
-         $List = $Sender->Data('AuthenticationConfigureList');
-         $List['openid'] = '/dashboard/plugin/openid';
-         $Sender->SetData('AuthenticationConfigureList', $List);
-      }
-   }
-
-   public function Setup() {
-      if (!ini_get('allow_url_fopen')) {
-         throw new Gdn_UserException('This plugin requires the allow_url_fopen php.ini setting.');
-      }
-   }
-
-   /// Plugin Event Handlers ///
-
-   public function Base_ConnectData_Handler($Sender, $Args) {
-      if (GetValue(0, $Args) != 'openid')
-         return;
-
-      $Mode = $Sender->Request->Get('openid_mode');
-      if ($Mode != 'id_res')
-         return; // this will error out
-
-      $this->EventArguments = $Args;
-
-      // Check session before retrieving
-      $Session = Gdn::Session();
-      $OpenID = $Session->Stash('OpenID', '', FALSE);
-      if (!$OpenID)
-         $OpenID = $this->GetOpenID();
-
-      if ($Session->Stash('OpenID', '', FALSE) || $OpenID->validate()) {
-         $Attr = $OpenID->getAttributes();
-
-         $Form = $Sender->Form; //new Gdn_Form();
-         $ID = $OpenID->identity;
-         $Form->SetFormValue('UniqueID', $ID);
-         $Form->SetFormValue('Provider', self::$ProviderKey);
-         $Form->SetFormValue('ProviderName', 'OpenID');
-         $Form->SetFormValue('FullName', GetValue('namePerson/first', $Attr).' '.GetValue('namePerson/last', $Attr));
-
-         if ($Email = GetValue('contact/email', $Attr)) {
-            $Form->SetFormValue('Email', $Email);
-         }
-
-         $Sender->SetData('Verified', TRUE);
-         $Session->Stash('OpenID', $OpenID);
-      }
-   }
-
-   /**
-    *
-    * @param EntryController $Sender
-    * @param array $Args
-    */
-   public function EntryController_OpenID_Create($Sender, $Args) {
-      $this->EventArguments = $Args;
-      $Sender->Form->InputPrefix = '';
-      $OpenID = $this->GetOpenID();
-
-      $Mode = $Sender->Request->Get('openid_mode');
-      switch($Mode) {
-         case 'cancel':
-            $Sender->Render('Cancel', '', 'plugins/OpenID');
-            break;
-         case 'id_res':
-            if ($OpenID->validate()) {
-               $Attributes = $OpenID->getAttributes();
-               print_r($_GET);
+        if ($url = Gdn::request()->get('url')) {
+            if (filter_var($url, FILTER_VALIDATE_URL) === false) {
+                throw new Gdn_UserException(sprintf(t('ValidateUrl'), 'OpenID'), 400);
             }
 
-            break;
-         default:
-            if (!$OpenID->identity) {
-               $Sender->CssClass = 'Dashboard Entry connect';
-               $Sender->SetData('Title', T('Sign In with OpenID'));
-               $Sender->Render('Url', '', 'plugins/OpenID');
-            } else {
-               try {
-                  $Url = $OpenID->authUrl();
-                  Redirect($Url);
-               } catch (Exception $Ex) {
-                  $Sender->Form->AddError($Ex);
-                  $Sender->Render('Url', '', 'plugins/OpenID');
-               }
+            // Don't allow open ID on a non-standard scheme.
+            $scheme = parse_url($url, PHP_URL_SCHEME);
+            if (!in_array($scheme, ['http', 'https'])) {
+                throw new Gdn_UserException(sprintf(t('ValidateUrl'), 'OpenID'), 400);
             }
-            break;
-      }
-   }
 
-   /**
-    *
-    * @param Gdn_Controller $Sender
-    */
-   public function EntryController_SignIn_Handler($Sender, $Args) {
-//      if (!$this->IsEnabled()) return;
+            // Make sure the host is not an ip.
+            $host = parse_url($url, PHP_URL_HOST);
+            if (filter_var($host, FILTER_VALIDATE_IP) !== false) {
+                throw new Gdn_UserException(sprintf(t('ValidateUrl').' '.t('The hostname cannot be an IP address.'), 'OpenID'), 400);
+            }
 
-      if (isset($Sender->Data['Methods'])) {
-         $ImgSrc = Asset('/plugins/OpenID/design/openid-signin.png');
-         $ImgAlt = T('Sign In with OpenID');
+            // Don't allow open ID on a non-standard port.
+            $port = parse_url($url, PHP_URL_PORT);
+            if ($port && !in_array($port, [80, 8080, 443])) {
+                throw new Gdn_UserException(t('OpenID is not allowed on non-standard ports.'));
+            }
 
-         $SigninHref = $this->_AuthorizeHref();
-         $PopupSigninHref = $this->_AuthorizeHref(TRUE);
+            $OpenID->identity = $url;
+        }
 
-         // Add the twitter method to the controller.
-         $Method = array(
-            'Name' => 'OpenID',
-            'SignInHtml' => "<a id=\"TwitterAuth\" href=\"$SigninHref\" class=\"PopupWindow\" popupHref=\"$PopupSigninHref\" popupHeight=\"400\" popupWidth=\"800\" rel=\"nofollow\" ><img src=\"$ImgSrc\" alt=\"$ImgAlt\" /></a>");
+        $Url = url('/entry/connect/openid', true);
+        $UrlParts = explode('?', $Url);
+        parse_str(val(1, $UrlParts, ''), $Query);
+        $Query = array_merge($Query, arrayTranslate($_GET, ['display', 'Target']));
 
-         $Sender->Data['Methods'][] = $Method;
-      }
-   }
+        $OpenID->returnUrl = $UrlParts[0].'?'.http_build_query($Query);
+        $OpenID->required = ['contact/email', 'namePerson/first', 'namePerson/last', 'pref/language'];
 
-   public function Base_SignInIcons_Handler($Sender, $Args) {
-//      if (!$this->IsEnabled()) return;
-      echo "\n".$this->_GetButton();
-   }
+        $this->EventArguments['OpenID'] = $OpenID;
+        $this->fireEvent('GetOpenID');
 
-   public function Base_BeforeSignInButton_Handler($Sender, $Args) {
-//      if (!$this->IsEnabled()) return;
-      echo "\n".$this->_GetButton();
-   }
+        return $OpenID;
+    }
 
-	private function _GetButton() {
-      $ImgSrc = Asset('/plugins/OpenID/design/openid-icon.png');
-      $ImgAlt = T('Sign In with OpenID');
-      $SigninHref = $this->_AuthorizeHref();
-      $PopupSigninHref = $this->_AuthorizeHref(TRUE);
-      return "<a id=\"OpenIDAuth\" href=\"$SigninHref\" class=\"PopupWindow\" title=\"$ImgAlt\" popupHref=\"$PopupSigninHref\" popupHeight=\"400\" popupWidth=\"800\" rel=\"nofollow\" ><img src=\"$ImgSrc\" alt=\"$ImgAlt\" /></a>";
-	}
+    /**
+     * Act as a mini dispatcher for API requests to the plugin app
+     */
+//   public function pluginController_OpenID_create($Sender) {
+//      $Sender->permission('Garden.Settings.Manage');
+//		$this->dispatch($Sender, $Sender->RequestArgs);
+//   }
 
-	public function Base_BeforeSignInLink_Handler($Sender) {
-//      if (!$this->IsEnabled())
-//			return;
+//   public function controller_Toggle($Sender) {
+//      $this->autoToggle($Sender);
+//   }
 
-		// if (!IsMobile())
-		// 	return;
+//   public function authenticationController_render_before($Sender, $Args) {
+//      if (isset($Sender->ChooserList)) {
+//         $Sender->ChooserList['openid'] = 'OpenID';
+//      }
+//      if (is_array($Sender->data('AuthenticationConfigureList'))) {
+//         $List = $Sender->data('AuthenticationConfigureList');
+//         $List['openid'] = '/dashboard/plugin/openid';
+//         $Sender->setData('AuthenticationConfigureList', $List);
+//      }
+//   }
 
-		if (!Gdn::Session()->IsValid())
-			echo "\n".Wrap($this->_GetButton(), 'li', array('class' => 'Connect OpenIDConnect'));
-	}
+    /**
+     * @throws Gdn_UserException
+     */
+    public function setup() {
+        if (!ini_get('allow_url_fopen')) {
+            throw new Gdn_UserException('This plugin requires the allow_url_fopen php.ini setting.');
+        }
+    }
+
+    /**
+     * Capture the user's UniqueID being sent back from provider.
+     *
+     * @param EntryController $sender
+     * @param array $args
+     * @throws Exception
+     * @throws Gdn_UserException
+     */
+    public function base_connectData_handler($sender, $args) {
+        if (($args[0] ?? '') !== 'openid') {
+            return;
+        }
+        if (!$this->signInAllowed()) {
+            throw new Gdn_UserException(t('OpenID signin has been disabled.'));
+        }
+
+        $mode = $sender->Request->get('openid_mode');
+        if ($mode != 'id_res') {
+            return; // this will error out
+        }
+        $this->EventArguments = $args;
+
+        // Check session before retrieving
+        $session = Gdn::session();
+        $openID = $this->getOpenID();
+        $sessionData = $session->stash('OpenID', '', false);
+
+        /**
+         * Save a successful validation and do not attempt to validate again. If a nonce is used as part of the request,
+         * and the user has to enter additional information to register (e.g. email), a second authentication attempt
+         * after they've submitted the requested information would fail.
+         */
+        if ($sessionData) {
+            $validated = true;
+            $openID->setData($sessionData['data']);
+            $openID->identity = $sessionData['identity'];
+        } elseif ($openID->validate()) {
+            $validated = true;
+            $session->stash('OpenID', [
+                'data' => $openID->getData(),
+                'identity' => $openID->identity
+            ]);
+        } else {
+            $validated = false;
+        }
+
+        if ($validated) {
+            $attr = $openID->getAttributes();
+
+            // This isn't a trusted connection. Don't allow it to automatically connect a user account.
+            saveToConfig('Garden.Registration.AutoConnect', false, false);
+
+            $form = $sender->Form; //new gdn_Form();
+            $iD = $openID->identity;
+            $form->setFormValue('UniqueID', $iD);
+            $form->setFormValue('Provider', self::$ProviderKey);
+            $form->setFormValue('ProviderName', 'OpenID');
+
+            $form->setFormValue('FullName', trim(val('namePerson/first', $attr).' '.val('namePerson/last', $attr)));
+
+            if ($email = val('contact/email', $attr)) {
+                $form->setFormValue('Email', $email);
+            }
+
+            $sender->setData('Verified', true);
+
+            $this->EventArguments['OpenID'] = $openID;
+            $this->EventArguments['Form'] = $form;
+            $this->fireEvent('AfterConnectData');
+
+        }
+    }
+
+    /**
+     * Endpoint for authenticating with OpenID.
+     *
+     * @param EntryController $Sender
+     * @param array $Args
+     */
+    public function entryController_openID_create($Sender, $Args) {
+        if (!$this->signInAllowed()) {
+            throw new Gdn_UserException(t('OpenID signin has been disabled.'));
+        }
+        $this->EventArguments = $Args;
+
+        try {
+            $OpenID = $this->getOpenID();
+        } catch (Gdn_UserException $ex) {
+            $Sender->Form->addError('@'.$ex->getMessage());
+        }
+
+        $Mode = $Sender->Request->get('openid_mode');
+        switch ($Mode) {
+            case 'cancel':
+                redirectTo(Gdn::router()->getDestination('DefaultController'));
+                break;
+            case 'id_res':
+                if ($OpenID->validate()) {
+                    $Attributes = $OpenID->getAttributes();
+                }
+
+                break;
+            default:
+                if (!$OpenID->identity) {
+                    $Sender->CssClass = 'Dashboard Entry connect';
+                    $Sender->setData('Title', t('Sign In with OpenID'));
+                    $Sender->render('Url', '', 'plugins/OpenID');
+                } else {
+                    try {
+                        $Url = $OpenID->authUrl();
+                        redirectTo($Url, 302, false);
+                    } catch (Exception $Ex) {
+                        $Sender->Form->addError($Ex);
+                        $Sender->render('Url', '', 'plugins/OpenID');
+                    }
+                }
+                break;
+        }
+    }
+
+    /**
+     *
+     *
+     * @param Gdn_Controller $sender
+     */
+    public function entryController_signIn_handler($sender, $args) {
+        if (isset($sender->Data['Methods']) && $this->signInAllowed()) {
+            $url = $this->_authorizeHref();
+
+            // Add the OpenID method to the controller.
+            $method = [
+                'Name' => 'OpenID',
+                'SignInHtml' => socialSigninButton('OpenID', $url, 'button', ['class' => 'js-extern'])
+            ];
+
+            $sender->Data['Methods'][] = $method;
+        }
+    }
+
+    /**
+     *
+     *
+     * @return bool
+     */
+    public function signInAllowed() {
+        return !c('Plugins.OpenID.DisableSignIn', false);
+    }
+
+    /**
+     *
+     *
+     * @param $sender
+     * @param $args
+     */
+    public function base_signInIcons_handler($sender, $args) {
+        if ($this->signInAllowed()) {
+            echo "\n".$this->_getButton();
+        }
+    }
+
+    /**
+     *
+     *
+     * @param $sender
+     * @param $args
+     */
+    public function base_beforeSignInButton_handler($sender, $args) {
+        if ($this->signInAllowed()) {
+            echo "\n".$this->_getButton();
+        }
+    }
+
+    /**
+     *
+     *
+     * @return string
+     */
+    private function _getButton() {
+        if ($this->signInAllowed()) {
+            $url = $this->_authorizeHref();
+            return socialSigninButton('OpenID', $url, 'icon', ['class' => 'js-extern', 'rel' => 'nofollow']);
+        }
+    }
+
+    /**
+     *
+     *
+     * @param $sender
+     */
+    public function base_beforeSignInLink_handler($sender) {
+        if (!Gdn::session()->isValid() && $this->signInAllowed()) {
+            echo "\n".wrap($this->_getButton(), 'li', ['class' => 'Connect OpenIDConnect']);
+        }
+    }
+
+    /**
+     * This OpenID plugin is requisite for some other sso plugins, but we may not always want the OpenID sso option.
+     *
+     * Let's allow users to remove the ability to sign in with OpenID.
+     */
+    public function settingsController_openID_create($sender) {
+        $sender->permission('Garden.Settings.Manage');
+
+        $conf = new ConfigurationModule($sender);
+        $conf->initialize([
+            'Plugins.OpenID.DisableSignIn' => ['Control' => 'Toggle', 'LabelCode' => 'Disable OpenID sign in', 'Default' => false]
+        ]);
+
+
+        $sender->setData('Title', sprintf(t('%s Settings'), t('OpenID')));
+        $sender->ConfigurationModule = $conf;
+        $conf->renderAll();
+    }
 }

@@ -1,204 +1,279 @@
-<?php if (!defined('APPLICATION')) exit();
-/*
-Copyright 2008, 2009 Vanilla Forums Inc.
-This file is part of Garden.
-Garden is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-Garden is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
-You should have received a copy of the GNU General Public License along with Garden.  If not, see <http://www.gnu.org/licenses/>.
-Contact Vanilla Forums Inc. at support [at] vanillaforums [dot] com
-*/
-/**
- * Message Controller
- * @package Dashboard
- */
-
+<?php
 /**
  * Messages are used to display (optionally dismissable) information in various parts of the applications.
  *
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
  * @package Dashboard
+ * @since 2.0
+ */
+
+/**
+ * Handles /message endpoint.
  */
 class MessageController extends DashboardController {
-   /** @var array Objects to prep. */
-   public $Uses = array('Form', 'MessageModel');
-   
-   /**
-    * Form to create a new message.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function Add() {
-      $this->Permission('Garden.Messages.Manage');
-      // Use the edit form with no MessageID specified.
-      $this->View = 'Edit';
-      $this->Edit();
-   }
-   
-   /**
-    * Delete a message.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function Delete($MessageID = '', $TransientKey = FALSE) {
-      $this->Permission('Garden.Messages.Manage');
-      $this->DeliveryType(DELIVERY_TYPE_BOOL);
-      $Session = Gdn::Session();
-      
-      if ($TransientKey !== FALSE && $Session->ValidateTransientKey($TransientKey)) {
-         $Message = $this->MessageModel->Delete(array('MessageID' => $MessageID));
-         // Reset the message cache
-         $this->MessageModel->SetMessageCache();
-      }
-      
-      if ($this->_DeliveryType === DELIVERY_TYPE_ALL)
-         Redirect('dashboard/message');
 
-      $this->Render();      
-   }
-   
-   /**
-    * Dismiss a message (per user).
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function Dismiss($MessageID = '', $TransientKey = FALSE) {
-      $Session = Gdn::Session();
-      
-      if ($TransientKey !== FALSE && $Session->ValidateTransientKey($TransientKey)) {
-         $Prefs = $Session->GetPreference('DismissedMessages', array());
-         $Prefs[] = $MessageID;
-         $Session->SetPreference('DismissedMessages', $Prefs);
-      }
-      
-      if ($this->_DeliveryType === DELIVERY_TYPE_ALL)
-         Redirect(GetIncomingValue('Target', '/discussions'));
+    /** @var array Objects to prep. */
+    public $Uses = ['Form', 'MessageModel'];
 
-      $this->Render();      
-   }
-   
-   /**
-    * Form to edit an existing message.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function Edit($MessageID = '') {
-      $this->AddJsFile('jquery.autogrow.js');
-      $this->AddJsFile('messages.js');
-         
-      $this->Permission('Garden.Messages.Manage');
-      $this->AddSideMenu('dashboard/message');
-      
-      // Generate some Controller & Asset data arrays
-      $this->SetData('Locations', $this->_GetLocationData());
-      $this->AssetData = $this->_GetAssetData();
-      
-      // Set the model on the form.
-      $this->Form->SetModel($this->MessageModel);
-      $this->Message = $this->MessageModel->GetID($MessageID);
-      $this->Message = $this->MessageModel->DefineLocation($this->Message);
-      
-      // Make sure the form knows which item we are editing.
-      if (is_numeric($MessageID) && $MessageID > 0)
-         $this->Form->AddHidden('MessageID', $MessageID);
-      
-      $CategoriesData = CategoryModel::Categories();
-      $Categories = array();
-      foreach ($CategoriesData as $Row) {
-         if ($Row['CategoryID'] < 0)
-            continue;
-         
-         $Categories[$Row['CategoryID']] = str_repeat('&nbsp;&nbsp;&nbsp;', max(0, $Row['Depth'] - 1)).$Row['Name'];
-      }
-      $this->SetData('Categories', $Categories);
+    /**
+     * Form to create a new message.
+     *
+     * @since 2.0.0
+     * @access public
+     */
+    public function add() {
+        $this->permission('Garden.Community.Manage');
+        // Use the edit form with no MessageID specified.
+        $this->View = 'Edit';
+        $this->edit();
+    }
 
-      // If seeing the form for the first time...
-      if (!$this->Form->AuthenticatedPostBack()) {
-         $this->Form->SetData($this->Message);
-      } else {
-         if ($MessageID = $this->Form->Save()) {
-            // Reset the message cache
-            $this->MessageModel->SetMessageCache();
-            
-            // Redirect
-            $this->InformMessage(T('Your changes have been saved.'));
-            //$this->RedirectUrl = Url('dashboard/message');
-         }
-      }
-      $this->Render();
-   }
-   
-   /**
-    * Main page. Show all messages.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function Index() {
-      $this->Permission('Garden.Messages.Manage');
-      $this->AddSideMenu('dashboard/message');
-      $this->AddJsFile('jquery.autogrow.js');
-      $this->AddJsFile('jquery.tablednd.js');
-      $this->AddJsFile('jquery-ui.js');
-      $this->AddJsFile('messages.js');
-      $this->Title(T('Messages'));
-         
-      // Load all messages from the db
-      $this->MessageData = $this->MessageModel->Get('Sort');
-      $this->Render();
-   }
-   
-   /**
-    * Always triggers first. Highlight path.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function Initialize() {
-      parent::Initialize();
-      Gdn_Theme::Section('Dashboard');
-      if ($this->Menu)
-         $this->Menu->HighlightRoute('/dashboard/settings');
-   }   
-   
-   /**
-    * Get descriptions of asset locations on page.
-    *
-    * @since 2.0.0
-    * @access protected
-    */
-   protected function _GetAssetData() {
-      $AssetData = array();
-      $AssetData['Content'] = T('Above Main Content');
-      $AssetData['Panel'] = T('Below Sidebar');
-      $this->EventArguments['AssetData'] = &$AssetData;
-      $this->FireEvent('AfterGetAssetData');
-      return $AssetData;
-   }
-   
-   /**
-    * Get descriptions of asset locations across site.
-    *
-    * @since 2.0.0
-    * @access protected
-    */
-   protected function _GetLocationData() {
-      $ControllerData = array();
-      $ControllerData['[Base]'] = T('All Pages');
-      $ControllerData['[NonAdmin]'] = T('All Forum Pages');
-      // 2011-09-09 - mosullivan - No longer allowing messages in dashboard
-      // $ControllerData['[Admin]'] = 'All Dashboard Pages';
-      $ControllerData['Dashboard/Profile/Index'] = T('Profile Page');
-      $ControllerData['Vanilla/Discussions/Index'] = T('Discussions Page');
-      $ControllerData['Vanilla/Discussion/Index'] = T('Comments Page');
-      $ControllerData['Vanilla/Post/Discussion'] = T('New Discussion Form');
-      $ControllerData['Dashboard/Entry/SignIn'] = T('Sign In');
-      // 2011-09-09 - mosullivan - No longer allowing messages in dashboard
-      // $ControllerData['Dashboard/Settings/Index'] = 'Dashboard Home';
-      $this->EventArguments['ControllerData'] = &$ControllerData;
-      $this->FireEvent('AfterGetLocationData');
-      return $ControllerData;
-   }
+    /**
+     * Delete a message.
+     *
+     * @since 2.0.0
+     * @access public
+     *
+     * @param int|string $messageID
+     */
+    public function delete($messageID = '') {
+        $this->permission('Garden.Community.Manage');
+
+        if (!Gdn::request()->isAuthenticatedPostBack(true)) {
+            throw new Exception('Requires POST', 405);
+        }
+        $this->MessageModel->delete(['MessageID' => $messageID]);
+
+        // Reset the message cache
+        $this->MessageModel->setMessageCache();
+
+        $this->informMessage(sprintf(t('%s deleted'), t('Message')));
+        $this->jsonTarget('', '', 'Refresh');
+
+        $this->render('blank', 'utility', 'dashboard');
+    }
+
+    /**
+     * Dismiss a message (per user).
+     *
+     * @since 2.0.0
+     * @access public
+     *
+     * @param int|string $messageID
+     * @param mixed $transientKey
+     */
+    public function dismiss($messageID = '', $transientKey = false) {
+        $session = Gdn::session();
+
+        $message = $this->MessageModel->getID($messageID, DATASET_TYPE_ARRAY);
+        $allowDismiss = $message['AllowDismiss'] ?? true;
+        if ($allowDismiss && $transientKey !== false && $session->validateTransientKey($transientKey)) {
+            $prefs = $session->getPreference('DismissedMessages', []);
+            $prefs[] = $messageID;
+            $session->setPreference('DismissedMessages', $prefs);
+        }
+
+        if ($this->_DeliveryType === DELIVERY_TYPE_ALL) {
+            redirectTo(getIncomingValue('Target', '/discussions'));
+        }
+
+        $this->render();
+    }
+
+    /**
+     * Form to edit an existing message.
+     *
+     * @since 2.0.0
+     * @access public
+     *
+     * @param int|string $messageID
+     */
+    public function edit($messageID = '') {
+        $this->addJsFile('jquery.autosize.min.js');
+
+        $this->permission('Garden.Community.Manage');
+        $this->setHighlightRoute('dashboard/message');
+
+        // Generate some Controller & Asset data arrays
+        $this->setData('Locations', $this->_getLocationData());
+        $this->AssetData = $this->_getAssetData();
+
+        // Set the model on the form.
+        $this->Form->setModel($this->MessageModel);
+        $this->Message = $this->MessageModel->getID($messageID);
+        $this->Message = $this->MessageModel->defineLocation($this->Message);
+
+        // Make sure the form knows which item we are editing.
+        if (is_numeric($messageID) && $messageID > 0) {
+            $this->Form->addHidden('MessageID', $messageID);
+        } else {
+            // Enable newly created messages by default.
+            $this->Form->setValue('Enabled', true);
+        }
+
+        $categoriesData = CategoryModel::categories();
+        $categories = [];
+        foreach ($categoriesData as $row) {
+            if ($row['CategoryID'] < 0) {
+                continue;
+            }
+
+            $categories[$row['CategoryID']] = str_repeat('&nbsp;&nbsp;&nbsp;', max(0, $row['Depth'] - 1)).$row['Name'];
+        }
+        $this->setData('Categories', $categories);
+
+        // If seeing the form for the first time...
+        if (!$this->Form->authenticatedPostBack()) {
+            $this->Form->setData($this->Message);
+        } else {
+            if ($messageID = $this->Form->save()) {
+                // Reset the message cache
+                $this->MessageModel->setMessageCache();
+
+                // Redirect
+                $this->informMessage(t('Your changes have been saved.'));
+                $this->jsonTarget('', '', 'Refresh');
+            }
+        }
+        $this->render();
+    }
+
+    /**
+     * Main page. Show all messages.
+     *
+     * @since 2.0.0
+     * @access public
+     */
+    public function index() {
+        $this->permission('Garden.Community.Manage');
+        $this->setHighlightRoute('dashboard/message');
+        $this->addJsFile('jquery.autosize.min.js');
+        $this->addJsFile('jquery.tablednd.js');
+        $this->title(t('Messages'));
+        Gdn_Theme::section('Moderation');
+
+        // Load all messages from the db
+        $this->MessageData = $this->MessageModel->get('Sort');
+        $this->render();
+    }
+
+    /**
+     * Always triggers first. Highlight path.
+     *
+     * @since 2.0.0
+     * @access public
+     */
+    public function initialize() {
+        parent::initialize();
+        Gdn_Theme::section('Dashboard');
+        if ($this->Menu) {
+            $this->Menu->highlightRoute('/dashboard/settings');
+        }
+    }
+
+    /**
+     * Enable a message.
+     *
+     * @param $messageID
+     * @throws Exception
+     */
+    public function enable($messageID) {
+        $this->permission('Garden.Community.Manage');
+        if (!Gdn::request()->isAuthenticatedPostBack(true)) {
+            throw new Exception('Requires POST', 405);
+        }
+        if ($messageID && is_numeric($messageID)) {
+            $this->setEnabled($messageID, 1);
+        }
+    }
+
+    /**
+     * Disable a message.
+     *
+     * @param $messageID
+     * @throws Exception
+     */
+    public function disable($messageID) {
+        $this->permission('Garden.Community.Manage');
+        if (!Gdn::request()->isAuthenticatedPostBack(true)) {
+            throw new Exception('Requires POST', 405);
+        }
+        if ($messageID && is_numeric($messageID)) {
+            $this->setEnabled($messageID, 0);
+        }
+    }
+
+    /**
+     * Generic method to set message state on/off.
+     *
+     * @param $messageID
+     * @param $enabled
+     */
+    protected function setEnabled($messageID, $enabled) {
+        $messageModel = new MessageModel();
+        $enabled = forceBool($enabled, '0', '1', '0');
+        $messageModel->setProperty($messageID, 'Enabled', $enabled);
+        $this->MessageModel->setMessageCache();
+        if ($enabled === '1') {
+            $newToggle = wrap(anchor('<div class="toggle-well"></div><div class="toggle-slider"></div>', '/dashboard/message/disable/'.$messageID, 'Hijack'), 'span', ['class' => "toggle-wrap toggle-wrap-on"]);
+        } else {
+            $newToggle = wrap(anchor('<div class="toggle-well"></div><div class="toggle-slider"></div>', '/dashboard/message/enable/'.$messageID, 'Hijack'), 'span', ['class' => "toggle-wrap toggle-wrap-off"]);
+        }
+        $this->jsonTarget("#toggle-".$messageID, $newToggle);
+        if ($enabled === '1') {
+            $this->informMessage(sprintf(t('%s enabled.'), t('Message')));
+        } else {
+            $this->informMessage(sprintf(t('%s disabled.'), t('Message')));
+        }
+        Gdn::cache()->remove('Messages');
+        $this->render('Blank', 'Utility');
+    }
+
+    /**
+     * Get descriptions of asset locations on page.
+     *
+     * @since 2.0.0
+     * @access protected
+     *
+     * @return array
+     */
+    protected function _getAssetData() {
+        $assetData = [
+            'Content' => t('Above Main Content'),
+            'Panel' => t('Below Sidebar')
+        ];
+
+        $this->EventArguments['AssetData'] = &$assetData;
+        $this->fireEvent('AfterGetAssetData');
+
+        return $assetData;
+    }
+
+    /**
+     * Get descriptions of asset locations across site.
+     *
+     * @since 2.0.0
+     * @access protected
+     *
+     * @return array
+     */
+    protected function _getLocationData() {
+        $controllerData = [
+            '[Base]' => t('All Pages'),
+            '[NonAdmin]' => t('All Forum Pages'),
+            'Dashboard/Profile/Index' => t('Profile Page'),
+            'Vanilla/Discussions/Index' => t('Discussions Page'),
+            'Vanilla/Categories/Index' => t('Categories Page'),
+            'Vanilla/Discussion/Index' => t('Comments Page'),
+            'Vanilla/Post/Discussion' => t('New Discussion Form'),
+            'Dashboard/Entry/SignIn' => t('Sign In'),
+            'Dashboard/Entry/Register' => t('Registration')
+        ];
+
+        $this->EventArguments['ControllerData'] = &$controllerData;
+        $this->fireEvent('AfterGetLocationData');
+
+        return $controllerData;
+    }
 }

@@ -1,33 +1,32 @@
 <?php if (!defined('APPLICATION')) exit();
-require_once $this->FetchViewLocation('helper_functions');
+require_once Gdn::controller()->fetchViewLocation('helper_functions', 'modules', 'vanilla');
+$Content = $this->data('Content');
 
-?>
-<div class="Box BoxPromoted">
-   <h4><?php echo T('Promoted Content'); ?></h4>
-   <div class="PanelInfo DataList">
-      <?php
-      $Content = $this->Data('Content');
-      $ContentItems = sizeof($Content);
-      
-      if ($Content):
-         
-         if ($this->Group):
-            $Content = array_chunk($Content, $this->Group);
-         endif;
-
-         foreach ($Content as $ContentChunk):
-            if ($this->Group):
-               echo '<div class="PromotedGroup">';
-               foreach ($ContentChunk as $ContentItem):
-                  WritePromotedContent($ContentItem, $this);
-               endforeach;
-               echo '</div>';
-            else:
-               WritePromotedContent($ContentChunk, $this);
+if (!empty($Content) || $this->getShowIfNoResults()) :
+    ?>
+    <div class="Box BoxPromoted">
+        <?php echo panelHeading(t('Promoted Content')); ?>
+        <div class="PanelInfo DataList">
+            <?php
+            if ($Content):
+                if ($this->Group):
+                    $Content = array_chunk($Content, $this->Group);
+                endif;
+                foreach ($Content as $ContentChunk):
+                    if ($this->Group):
+                        echo '<div class="PromotedGroup">';
+                        foreach ($ContentChunk as $ContentItem):
+                            writePromotedContent($ContentItem, $this);
+                        endforeach;
+                        echo '</div>';
+                    else:
+                        writePromotedContent($ContentChunk, $this);
+                    endif;
+                endforeach;
             endif;
-         endforeach;
-         
-      endif;
-      ?>
-   </div>
-</div>
+            ?>
+        </div>
+    </div>
+    <?php
+endif;
+?>

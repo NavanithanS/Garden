@@ -1,78 +1,176 @@
-<?php if (!defined('APPLICATION')) exit();
-
+<?php
 /**
- * Garden.Modules
+ * New Discussion module
+ *
+ * @copyright 2009-2020 Vanilla Forums Inc.
+ * @license GPL-2.0-only
+ * @package Vanilla
+ * @since 2.0
  */
+
+use Vanilla\Contracts\LocaleInterface;
 
 /**
  * Renders the "Start a New Discussion" button.
  */
 class NewDiscussionModule extends Gdn_Module {
+    /** @var LocaleInterface */
+    private $locale;
 
-   public function AssetTarget() {
-      return 'Panel';
-   }
+    /** @var int Which category we are viewing (if any). */
+    public $CategoryID = null;
 
-   public $CategoryID = NULL;
-   public $DefaultButton;
-   public $CssClass = 'Button Action Big Primary';
-   public $QueryString = '';
+    /** @var string Which button will be used as the default. */
+    public $DefaultButton;
 
-   public function __construct($Sender = '', $ApplicationFolder = FALSE) {
-      parent::__construct($Sender, 'Vanilla');
-      // Customize main button by setting Vanilla.DefaultNewButton to URL code. Example: "post/question"
-      $this->DefaultButton = C('Vanilla.DefaultNewButton', FALSE);
-   }
+    /** @var string CSS classes to apply to ButtonGroup. */
+    public $CssClass = 'Button Action Big Primary';
 
-   public function ToString() {
-      if ($this->CategoryID === NULL)
-         $this->CategoryID = Gdn::Controller()->Data('Category.CategoryID', FALSE);
+    /** @var string Query string to append to button URL. */
+    public $QueryString = '';
 
-      Gdn::Controller()->EventArguments['NewDiscussionModule'] = &$this;
-      Gdn::Controller()->FireEvent('BeforeNewDiscussionButton');
+    /** @var array Collection of buttons to display. */
+    public $Buttons = [];
 
-      // Make sure the user has the most basic of permissions first.
-      $PermissionCategory = CategoryModel::PermissionCategory($this->CategoryID);
-      if ($this->CategoryID) {
-         $Category = CategoryModel::Categories($this->CategoryID);
-         $HasPermission = Gdn::Session()->CheckPermission('Vanilla.Discussions.Add', TRUE, 'Category', GetValue('CategoryID', $PermissionCategory));
-      } else {
-         $HasPermission = Gdn::Session()->CheckPermission('Vanilla.Discussions.Add', TRUE, 'Category', 'any');
-      }
-      if (!$HasPermission)
-         return '';
+    /** @var bool Whether to show button to all users & guests regardless of permissions. */
+    public $ShowGuests = false;
 
-      // Grab the allowed discussion types.
-      $DiscussionTypes = CategoryModel::AllowedDiscussionTypes($PermissionCategory);
+    /** @var string Where to send users without permission when $SkipPermissions is enabled. */
+    public $GuestUrl = '/entry/signin';
 
-      foreach ($DiscussionTypes as $Key => $Type) {
-         if (isset($Type['AddPermission']) && !Gdn::Session()->CheckPermission($Type['AddPermission'])) {
-            unset($DiscussionTypes[$Key]);
-            continue;
-         }
+    /** @var boolean Reorder HTML for easier styling */
+    public $reorder = false;
 
-         $Url = GetValue('AddUrl', $Type);
-         if (!$Url)
-            continue;
+    /**
+     * Set default button.
+     *
+     * @param string $sender
+     * @param bool $applicationFolder Unused.
+     */
+    public function __construct($sender = '', $applicationFolder = false) {
+        parent::__construct($sender, 'Vanilla');
+        $this->locale = Gdn::getContainer()->get(\Vanilla\Contracts\LocaleInterface::class);
+        // Customize main button by setting Vanilla.DefaultNewButton to URL code. Example: "post/question"
+        $this->DefaultButton = c('Vanilla.DefaultNewButton', false);
+    }
 
-         if (isset($Category)) {
-            $Url .= '/'.rawurlencode(GetValue('UrlCode', $Category));
-         }
+    /**
+     *
+     *
+     * @return string
+     */
+    public function assetTarget() {
+        return 'Panel';
+    }
 
-         $this->AddButton(T(GetValue('AddText', $Type)), $Url);
-      }
+    /**
+     * Add a button to the collection.
+     *
+     * @param string $text
+     * @param string $url
+     * @param bool $asOwnButton Whether to display as a separate button or not.
+     */
+    public function addButton($text, $url, $asOwnButton = false) {
+        $this->Buttons[] = ['Text' => $text, 'Url' => $url, 'asOwnButton' => $asOwnButton];
+    }
 
-      if ($this->QueryString) {
-         foreach ($this->Buttons as &$Row) {
-            $Row['Url'] .= (strpos($Row['Url'], '?') !== FALSE ? '&' : '?').$this->QueryString;
-         }
-      }
+    /**
+     * Render the module.
+     *
+     * @return string
+     */
+    public function toString() {
+        // Set CategoryID if we have one.
+        if (c('Vanilla.Categories.Use', true) && $this->CategoryID === null) {
+            $this->CategoryID = Gdn::controller()->data('Category.CategoryID', Gdn::controller()->data('ContextualCategoryID', false));
+        }
 
-      return parent::ToString();
-   }
+        // Allow plugins and themes to modify parameters.
+        Gdn::controller()->EventArguments['NewDiscussionModule'] = &$this;
+        Gdn::controller()->fireEvent('BeforeNewDiscussionButton');
 
-   public $Buttons = array();
-   public function AddButton($Text, $Url) {
-      $this->Buttons[] = array('Text' => $Text, 'Url' => $Url);
-   }
+        // Make sure the user has the most basic of permissions first.
+        $permissionCategory = CategoryModel::permissionCategory($this->CategoryID);
+        if ($this->CategoryID) {
+            $category = CategoryModel::categories($this->CategoryID);
+            $hasPermission = CategoryModel::checkPermission($this->CategoryID, 'Vanilla.Discussions.Add');
+        } else {
+            $hasPermission = Gdn::session()->checkPermission('Vanilla.Discussions.Add', true, 'Category', 'any');
+        }
+
+        // Determine if this is a guest & we're using "New Discussion" button as call to action.
+        $privilegedGuest = ($this->ShowGuests && !Gdn::session()->isValid());
+
+        // No module for you!
+        if (!$hasPermission && !$privilegedGuest) {
+            return '';
+        }
+
+        // Grab the allowed discussion types.
+        $discussionTypes = CategoryModel::allowedDiscussionTypes($permissionCategory, isset($category) ? $category : [], $this->_Sender);
+        $buttonsConfig = c('NewDiscussionModule.Types', []);
+
+        foreach ($discussionTypes as $key => $type) {
+            if (isset($type['AddPermission']) && !Gdn::session()->checkPermission($type['AddPermission'])) {
+                unset($discussionTypes[$key]);
+                continue;
+            }
+
+            $url = val('AddUrl', $type);
+            if (!$url) {
+                continue;
+            }
+
+            $hasQuery = strpos($url, '?') !== false;
+
+            if (!$hasQuery) {
+                if (isset($category)) {
+                    $url .= '/'.rawurlencode(val('UrlCode', $category));
+                }
+
+                // Present a signin redirect for a $PrivilegedGuest.
+                if (!$hasPermission) {
+                    $url = $this->GuestUrl.'?Target='.$url;
+                }
+            }
+            // Check whether to display in dropdown or as a separate button.
+            $asOwnButton = $buttonsConfig[$type['Singular']]['AsOwnButton'] ?? false;
+
+            $this->addButton(
+                $this->locale->translate($type['AddText'] ?? ''),
+                $url,
+                $asOwnButton
+            );
+        }
+
+        // Add QueryString to URL if one is defined.
+        if ($this->QueryString && $hasPermission) {
+            foreach ($this->Buttons as &$row) {
+                $row['Url'] .= (strpos($row['Url'], '?') !== false ? '&' : '?').$this->QueryString;
+            }
+        }
+
+        return parent::toString();
+    }
+
+    /**
+     * Groups buttons according to whether they are standalone or part of a dropdown.
+     *
+     * @return array Returns buttons grouped by whether they are standalone or part of a dropdown.
+     */
+    public function getButtonGroups(): array {
+        $allButtons = [];
+        $groupedButtons = [];
+        foreach ($this->Buttons as $key => $button) {
+            if ($button['asOwnButton']) {
+                $allButtons[] = [$button];
+            } else {
+                $groupedButtons[] = $button;
+            }
+        }
+        if (!empty($groupedButtons)) {
+            array_unshift($allButtons, $groupedButtons);
+        }
+        return $allButtons;
+    }
 }

@@ -1,121 +1,138 @@
-<?php if (!defined('APPLICATION')) exit();
-$Session = Gdn::Session();
+<?php
+use Vanilla\FeatureFlagHelper;
+if (!defined('APPLICATION')) exit();
+$Session = Gdn::session();
 $User = $Session->User;
 $CssClass = '';
+$transientKey = Gdn::session()->transientKey();
+
 if ($this->CssClass)
-   $CssClass .= ' '.$this->CssClass;
+    $CssClass .= ' '.$this->CssClass;
 
 $DashboardCount = 0;
+$ModerationCount = 0;
+$spamCount = 0;
 // Spam & Moderation Queue
-if ($Session->CheckPermission(array('Garden.Settings.Manage', 'Garden.Moderation.Manage', 'Moderation.Spam.Manage', 'Moderation.ModerationQueue.Manage'), FALSE)) {
-   $LogModel = new LogModel();
-   //$SpamCount = $LogModel->GetOperationCount('spam');
-   $ModerationCount = $LogModel->GetOperationCount('moderate');
-   $DashboardCount += $ModerationCount;
+if ($Session->checkPermission(['Garden.Settings.Manage', 'Garden.Moderation.Manage', 'Moderation.Spam.Manage', 'Moderation.ModerationQueue.Manage'], false)) {
+    $LogModel = new LogModel();
+    $spamCount = $LogModel->getOperationCount('spam');
+    $ModerationCount = $LogModel->getOperationCount('moderate,pending');
+    $DashboardCount += $ModerationCount;
 }
 // Applicant Count
-if ($Session->CheckPermission('Garden.Users.Approve')) {
-   $RoleModel = new RoleModel();
-   $ApplicantCount = $RoleModel->GetApplicantCount();
-   $DashboardCount += $ApplicantCount;
+if ($Session->checkPermission('Garden.Users.Approve')) {
+    $RoleModel = new RoleModel();
+    $ApplicantCount = $RoleModel->getApplicantCount();
+    $DashboardCount += $ApplicantCount;
+} else {
+    $ApplicantCount = null;
 }
 
+$useNewFlyouts = Gdn::themeFeatures()->useNewFlyouts();
+
 $this->EventArguments['DashboardCount'] = &$DashboardCount;
-$this->FireEvent('BeforeFlyoutMenu');
+$this->fireEvent('BeforeFlyoutMenu');
 
-if ($Session->IsValid()):
-   echo '<div class="MeBox'.$CssClass.'">';
-   echo UserPhoto($User);
-   echo '<div class="WhoIs">';
-      echo UserAnchor($User, 'Username');
-      echo '<div class="MeMenu">';
-         // Notifications
-         $CountNotifications = $User->CountNotifications;
-         $CNotifications = is_numeric($CountNotifications) && $CountNotifications > 0 ? '<span class="Alert">'.$CountNotifications.'</span>' : '';
-         
-         echo '<span class="ToggleFlyout" rel="/profile/notificationspopin">';
-         echo Anchor(Sprite('SpNotifications', 'Sprite Sprite16').Wrap(T('Notifications'), 'em').$CNotifications, UserUrl($User), 'MeButton FlyoutButton', array('title' => T('Notifications')));
-         echo Sprite('SpFlyoutHandle', 'Arrow');
-         echo '<div class="Flyout FlyoutMenu"></div></span>';
-         
-         // Inbox
-         if (Gdn::ApplicationManager()->CheckApplication('Conversations')) {
-            $CountInbox = GetValue('CountUnreadConversations', Gdn::Session()->User);
-            $CInbox = is_numeric($CountInbox) && $CountInbox > 0 ? ' <span class="Alert">'.$CountInbox.'</span>' : '';
-            echo '<span class="ToggleFlyout" rel="/messages/popin">';
-            echo Anchor(Sprite('SpInbox', 'Sprite Sprite16').Wrap(T('Inbox'), 'em').$CInbox, '/messages/all', 'MeButton FlyoutButton', array('title' => T('Inbox')));
-            echo Sprite('SpFlyoutHandle', 'Arrow');
-            echo '<div class="Flyout FlyoutMenu"></div></span>';
-         }
-         
-         // Bookmarks
-         if (Gdn::ApplicationManager()->CheckApplication('Vanilla')) {
-            echo '<span class="ToggleFlyout" rel="/discussions/bookmarkedpopin">';
-            echo Anchor(Sprite('SpBookmarks', 'Sprite Sprite16').Wrap(T('Bookmarks'), 'em'), '/discussions/bookmarked', 'MeButton FlyoutButton', array('title' => T('Bookmarks')));
-            echo Sprite('SpFlyoutHandle', 'Arrow');
-            echo '<div class="Flyout FlyoutMenu"></div></span>';
-         }
-         
-         // Profile Settings & Logout
-         echo '<span class="ToggleFlyout">';
-         $CDashboard = $DashboardCount > 0 ? Wrap($DashboardCount, 'span class="Alert"') : '';
-         echo Anchor(Sprite('SpOptions', 'Sprite Sprite16').Wrap(T('Account Options'), 'em').$CDashboard, '/profile/edit', 'MeButton FlyoutButton', array('title' => T('Account Options')));
-         echo Sprite('SpFlyoutHandle', 'Arrow');
-         echo '<div class="Flyout MenuItems">';
-            echo '<ul>';
-               // echo Wrap(Wrap(T('My Account'), 'strong'), 'li');
-               // echo Wrap('<hr />', 'li');
-               if (C('Garden.UserAccount.AllowEdit') && C('Garden.Registration.Method') != 'Connect') {
-                  echo Wrap(Anchor(Sprite('SpEditProfile').' '.T('Edit Profile'), 'profile/edit', 'EditProfileLink'), 'li', array('class' => 'EditProfileWrap'));
-               } else {
-                  echo Wrap(Anchor(Sprite('SpEditProfile').' '.T('Preferences'), 'profile/preferences', 'EditProfileLink'), 'li', array('class' => 'EditProfileWrap'));
-               }
+if ($Session->isValid()):
+    echo '<div class="MeBox'.$CssClass.'">';
+    if (!$useNewFlyouts) {
+        echo userPhoto($User);
+    }
+    echo '<div class="WhoIs">';
+    if (!$useNewFlyouts) {
+        echo userAnchor($User, 'Username');
+    }
+    echo '<div class="MeMenu">';
+    // Notifications
+    $CountNotifications = $User->CountNotifications;
+    $CNotifications = is_numeric($CountNotifications) && $CountNotifications > 0 ? '<span class="Alert NotificationsAlert">'.$CountNotifications.'</span>' : '';
 
-               if ($Session->CheckPermission(array('Garden.Settings.View', 'Garden.Settings.Manage', 'Garden.Moderation.Manage', 'Moderation.Spam.Manage', 'Moderation.ModerationQueue.Manage'), FALSE)) {
-                  echo Wrap('<hr />', 'li');
-                  $CApplicant = $ApplicantCount > 0 ? ' '.Wrap($ApplicantCount, 'span class="Alert"') : '';
-                  $CSpam = ''; //$SpamCount > 0 ? ' '.Wrap($SpamCount, 'span class="Alert"') : '';
-                  $CModeration = $ModerationCount > 0 ? ' '.Wrap($ModerationCount, 'span class="Alert"') : '';
-                  echo Wrap(Anchor(Sprite('SpApplicants').' '.T('Applicants').$CApplicant, '/dashboard/user/applicants'), 'li');
+    echo '<span class="ToggleFlyout" rel="/profile/notificationspopin?TransientKey='.htmlspecialchars(urlencode($transientKey)).'">';
+    echo anchor(sprite('SpNotifications', 'Sprite Sprite16', t('Notifications')).$CNotifications, userUrl($User), 'MeButton FlyoutButton js-clear-notifications', ['title' => t('Notifications'), 'tabindex' => '0', "role" => "button", "aria-haspopup" => "true"]);
+    echo sprite('SpFlyoutHandle', 'Arrow');
+    echo '<div class="Flyout FlyoutMenu Flyout-withFrame"></div></span>';
 
-                  if ($Session->CheckPermission(array('Garden.Settings.Manage', 'Garden.Moderation.Manage', 'Moderation.ModerationQueue.Manage'), FALSE)) {
-                     echo Wrap(Anchor(Sprite('SpSpam').' '.T('Spam Queue').$CSpam, '/dashboard/log/spam'), 'li');
-                  }
+    // Inbox
+    if (Gdn::addonManager()->isEnabled('conversations', \Vanilla\Addon::TYPE_ADDON)) {
+        $CountInbox = val('CountUnreadConversations', Gdn::session()->User);
+        $CInbox = is_numeric($CountInbox) && $CountInbox > 0 ? ' <span class="Alert">'.$CountInbox.'</span>' : '';
+        echo '<span class="ToggleFlyout" rel="/messages/popin">';
+        echo anchor(sprite('SpInbox', 'Sprite Sprite16', t('Inbox')).$CInbox, '/messages/all', 'MeButton FlyoutButton', ['title' => t('Inbox'), 'tabindex' => '0', "role" => "button", "aria-haspopup" => "true"]);
+        echo sprite('SpFlyoutHandle', 'Arrow');
+        echo '<div class="Flyout FlyoutMenu Flyout-withFrame"></div></span>';
+    }
 
-                  if ($Session->CheckPermission(array('Garden.Settings.Manage', 'Garden.Moderation.Manage', 'Moderation.ModerationQueue.Manage'), FALSE)) {
-                     echo Wrap(Anchor(Sprite('SpMod').' '.T('Moderation Queue').$CModeration, '/dashboard/log/moderation'), 'li');
-                  }
+    // Bookmarks
+    if (Gdn::addonManager()->lookupAddon('Vanilla')) {
+        echo '<span class="ToggleFlyout" rel="/discussions/bookmarkedpopin">';
+        echo anchor(sprite('SpBookmarks', 'Sprite Sprite16', t('Bookmarks')), '/discussions/bookmarked', 'MeButton FlyoutButton', ['title' => t('Bookmarks'), 'tabindex' => '0', "role" => "button", "aria-haspopup" => "true"]);
+        echo sprite('SpFlyoutHandle', 'Arrow');
+        echo '<div class="Flyout FlyoutMenu Flyout-withFrame"></div></span>';
+    }
 
-                  if ($Session->CheckPermission(array('Garden.Settings.View', 'Garden.Settings.Manage'), FALSE)) {
-                     echo Wrap(Anchor(Sprite('SpDashboard').' '.T('Dashboard'), '/dashboard/settings'), 'li');
-                  }
-               }
-               
-               $this->FireEvent('FlyoutMenu');
-               echo Wrap('<hr />'.Anchor(Sprite('SpSignOut').' '.T('Sign Out'), SignOutUrl()), 'li', array('class' => 'SignInOutWrap SignOutWrap'));
-         echo '</div>';
-         echo '</span>';
+    // Profile Settings & Logout
+    $dropdown = new DropdownModule();
+    $dropdown->setData('DashboardCount', $DashboardCount);
+    $triggerTitle = t('Account Options');
 
-         // Sign Out
-         // echo Anchor(Sprite('SpSignOut', 'Sprite16').Wrap(T('Sign Out'), 'em'), SignOutUrl(), 'MeButton', array('title' => T('Sign Out')));
+    if ($useNewFlyouts) {
+        $imgUrl = userPhotoUrl($User);
+        $triggerIcon = "<img class='ProfilePhoto ProfilePhotoSmall' src='$imgUrl'/>";
+    } else {
+        $triggerIcon = sprite('SpOptions', 'Sprite Sprite16', $triggerTitle);
+    }
 
-      echo '</div>';
-   echo '</div>';
-   echo '</div>';
+    $dropdown->setTrigger('', 'anchor', 'MeButton FlyoutButton MeButton-user', $triggerIcon, '/profile/edit', ['title' => $triggerTitle, 'tabindex' => '0', "role" => "button", "aria-haspopup" => "true"]);
+    $editModifiers['listItemCssClasses'] = ['EditProfileWrap', 'link-editprofile'];
+    $preferencesModifiers['listItemCssClasses'] = ['EditProfileWrap', 'link-preferences'];
+
+    $dropdown->addLinkIf(hasViewProfile(Gdn::session()->UserID), t('View Profile'), '/profile', 'profile.view', '', [], $editModifiers);
+    $dropdown->addLinkIf(hasEditProfile(Gdn::session()->UserID), t('Edit Profile'), '/profile/edit', 'profile.edit', '', [], $editModifiers);
+    $dropdown->addLinkIf(!hasEditProfile(Gdn::session()->UserID), t('Preferences'), '/profile/preferences', 'profile.preferences', '', [], $preferencesModifiers);
+
+    $applicantModifiers = $ApplicantCount > 0 ? ['badge' => $ApplicantCount] : [];
+    $applicantModifiers['listItemCssClasses'] = ['link-applicants'];
+    $modModifiers = $ModerationCount > 0 ? ['badge' => $ModerationCount] : [];
+    $spamModifiers = $spamCount > 0 ? ['badge' => $spamCount] : [];
+    $modModifiers['listItemCssClasses'] = ['link-moderation'];
+    $spamModifiers['listItemCssClasses'] = ['link-spam'];
+    $dashboardModifiers['listItemCssClasses'] = ['link-dashboard'];
+    $signoutModifiers['listItemCssClasses'] = ['link-signout', 'SignInOutWrap', 'SignOutWrap'];
+
+    $spamPermission = $Session->checkPermission(['Garden.Settings.Manage', 'Garden.Moderation.Manage', 'Moderation.ModerationQueue.Manage'], false);
+    $modPermission = $Session->checkPermission(['Garden.Settings.Manage', 'Garden.Moderation.Manage', 'Moderation.ModerationQueue.Manage'], false);
+    $dashboardPermission = $Session->checkPermission(['Garden.Settings.View', 'Garden.Settings.Manage'], false);
+
+    $dropdown->addLinkIf('Garden.Users.Approve', t('Applicants'), '/dashboard/user/applicants', 'moderation.applicants', '', [], $applicantModifiers);
+    $dropdown->addLinkIf($spamPermission, t('Spam Queue'), '/dashboard/log/spam', 'moderation.spam', '', [], $spamModifiers);
+    $dropdown->addLinkIf($modPermission, t('Moderation Queue'), '/dashboard/log/moderation', 'moderation.moderation', '', [], $modModifiers);
+    $dropdown->addLinkIf($dashboardPermission, t('Dashboard'), '/dashboard/settings', 'dashboard.dashboard', '', [], $dashboardModifiers);
+
+    $dropdown->addLink(t('Sign Out'), signOutUrl(), 'entry.signout', '', [], $signoutModifiers);
+
+    $this->EventArguments['Dropdown'] = &$dropdown;
+    $this->fireEvent('FlyoutMenu');
+    echo $dropdown;
+    if ($useNewFlyouts) {
+        echo "<button class='MeBox-mobileClose'>×</button>";
+    }
+    echo '</div>';
+    echo '</div>';
+    echo '</div>';
 else:
-   echo '<div class="MeBox MeBox-SignIn'.$CssClass.'">';
+    echo '<div class="MeBox MeBox-SignIn'.$CssClass.'">';
 
-   echo '<div class="SignInLinks">';
+    echo '<div class="SignInLinks">';
 
-   echo Anchor(T('Sign In'), SignInUrl($this->_Sender->SelfUrl), (SignInPopup() ? ' SignInPopup' : ''), array('rel' => 'nofollow'));
-   $Url = RegisterUrl($this->_Sender->SelfUrl);
-      if(!empty($Url))
-         echo Bullet(' ').Anchor(T('Register'), $Url, 'ApplyButton', array('rel' => 'nofollow')).' ';
-   echo '</div>';
-      
-   echo ' <div class="SignInIcons">';
-   $this->FireEvent('SignInIcons');
-   echo '</div>';
-   
-   echo '</div>';
+    echo anchor(t('Sign In'), signInUrl($this->_Sender->SelfUrl), (signInPopup() ? ' SignInPopup' : ''), ['rel' => 'nofollow']);
+    $Url = registerUrl($this->_Sender->SelfUrl);
+    if (!empty($Url))
+        echo bullet(' ').anchor(t('Register'), $Url, 'ApplyButton', ['rel' => 'nofollow']).' ';
+    echo '</div>';
+
+    echo ' <div class="SignInIcons">';
+    $this->fireEvent('SignInIcons');
+    echo '</div>';
+
+    echo '</div>';
 endif;

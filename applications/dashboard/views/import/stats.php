@@ -1,32 +1,44 @@
 <?php if (!defined('APPLICATION')) exit(); ?>
-<table class="AltColumns">
-	<?php
-   $Header = array();
-   $ImportPaths = $this->Data('ImportPaths');
-   if (is_array($ImportPaths))
-      $Filename = GetValue($this->Data('ImportPath'), $ImportPaths);
-   else
-      $Filename = '';
-   //$Filename = GetValue('OriginalFilename', $this->Data);
-   if($Filename)
-      $Header[T('Source')] = $Filename;
+<div class="table-wrap">
+    <table class="table-data">
+        <?php
+        $Header = [];
+        $ImportPaths = $this->data('ImportPaths');
+        if (is_array($ImportPaths))
+            $Filename = val($this->data('ImportPath'), $ImportPaths);
+        else
+            $Filename = '';
+        //$Filename = val('OriginalFilename', $this->Data);
+        if ($Filename)
+            $Header[t('Source')] = $Filename;
 
-   $Header = array_merge($Header, (array)GetValue('Header', $this->Data, array()));
-   $Stats = (array)GetValue('Stats', $this->Data, array());
-   $Info = array_merge($Header, $Stats);
-	foreach($Info as $Name => $Value) {
-      if(substr_compare('Time', $Name, 0, 4, TRUE) == 0)
-         $Value = Gdn_Timer::FormatElapsed($Value);
+        $Header = array_merge($Header, (array)getValue('Header', $this->Data, []));
+        $Stats = (array)getValue('Stats', $this->Data, []);
+        $Info = array_merge($Header, $Stats);
+        foreach ($Info as $Name => $Value) {
+            switch ($Name) {
+                case 'Orphaned Comments':
+                case 'Orphaned Discussions':
+                    $Value .= ' '.anchor(
+                            t('Click here to fix.'),
+                            Gdn::request()->url('dba/fixinsertuserid')
+                        );
+                    break;
+                default:
+                    $Name = htmlspecialchars($Name);
+                    $Value = htmlspecialchars($Value);
 
+                    if (substr_compare('Time', $Name, 0, 4, true) == 0) {
+                        $Value = Gdn_Timer::formatElapsed($Value);
+                    }
+            }
 
-		$Name = htmlspecialchars($Name);
-		$Value = htmlspecialchars($Value);
+            echo "<tr><th>$Name</th><td class=\"Alt\">$Value</td></tr>\n";
+        }
 
-		echo "<tr><th>$Name</th><td class=\"Alt\">$Value</td></tr>\n";
-	}
-
-   if ($this->Data('GenerateSQL')) {
-      echo "<tr><th>".T('Special')."</th><td class=\"Alt\">".T('Generate import SQL only')."</td></tr>\n";
-   }
-	?>
-</table>
+        if ($this->data('GenerateSQL')) {
+            echo "<tr><th>".t('Special')."</th><td class=\"Alt\">".t('Generate import SQL only')."</td></tr>\n";
+        }
+        ?>
+    </table>
+</div>

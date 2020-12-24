@@ -1,169 +1,286 @@
-<?php if (!defined('APPLICATION')) exit();
-
+<?php
 /**
- * Smart abstraction layer
- * 
- * Vanilla implementation of Smarty templating engine.
+ * Smart abstraction layer.
  *
  * @author Mark O'Sullivan <markm@vanillaforums.com>
- * @copyright 2003 Vanilla Forums, Inc
- * @license http://www.opensource.org/licenses/gpl-2.0.php GPL
- * @package Garden
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
+ * @package Core
  * @since 2.0
  */
 
-class Gdn_Smarty {
-   /// Constructor ///
+use Vanilla\SmartyBC;
 
-   /// Properties ///
+/**
+ * Vanilla implementation of Smarty templating engine.
+ */
+class Gdn_Smarty implements \Vanilla\Contracts\Web\LegacyViewHandlerInterface {
 
-   /**
-    * @var Smarty The smarty object used for the template.
-    */
-   protected $_Smarty = NULL;
+    /** @var Smarty The smarty object used for the template. */
+    protected $_Smarty = null;
 
-   /// Methods ///
+    /**
+     *
+     *
+     * @param string $path
+     * @param Gdn_Controller $controller
+     */
+    public function init($path, $controller) {
+        $smarty = $this->smarty();
 
-   
-   public function Init($Path, $Controller) {
-      $Smarty = $this->Smarty();
+        // Get a friendly name for the controller.
+        $controllerName = get_class($controller);
+        if (stringEndsWith($controllerName, 'Controller', true)) {
+            $controllerName = substr($controllerName, 0, -10);
+        }
 
-      // Get a friendly name for the controller.
-      $ControllerName = get_class($Controller);
-      if (StringEndsWith($ControllerName, 'Controller', TRUE)) {
-         $ControllerName = substr($ControllerName, 0, -10);
-      }
+        // Get an ID for the body.
+        $methodStr = Gdn_Format::alphaNumeric(strtolower($controller->RequestMethod));
+        $bodyIdentifier = strtolower($controller->ApplicationFolder.'_'.$controllerName).'_'.$methodStr;
+        $smarty->assign('BodyID', htmlspecialchars($bodyIdentifier));
+        $smarty->assign('DataDrivenTitleBar', Gdn::config("Feature.DataDrivenTitleBar.Enabled", false));
 
-      // Get an ID for the body.
-      $BodyIdentifier = strtolower($Controller->ApplicationFolder.'_'.$ControllerName.'_'.Gdn_Format::AlphaNumeric(strtolower($Controller->RequestMethod)));
-      $Smarty->assign('BodyID', $BodyIdentifier);
-      //$Smarty->assign('Config', Gdn::Config());
+        // Assign some information about the user.
+        $session = Gdn::session();
+        if ($session->isValid()) {
+            $user = [
+                'Name' => htmlspecialchars($session->User->Name),
+                'Photo' => '',
+                'CountNotifications' => (int)val('CountNotifications', $session->User, 0),
+                'CountUnreadConversations' => (int)val('CountUnreadConversations', $session->User, 0),
+                'SignedIn' => true];
 
-      // Assign some information about the user.
-      $Session = Gdn::Session();
-      if($Session->IsValid()) {
-         $User = array(
-            'Name' => $Session->User->Name,
-            'Photo' => '',
-            'CountNotifications' => (int)GetValue('CountNotifications', $Session->User, 0),
-            'CountUnreadConversations' => (int)GetValue('CountUnreadConversations', $Session->User, 0),
-            'SignedIn' => TRUE);
-         
-         $Photo = $Session->User->Photo;
-         if ($Photo) {
-            if (!IsUrl($Photo)) {
-               $Photo = Gdn_Upload::Url(ChangeBasename($Photo, 'n%s'));
+            $photo = $session->User->Photo;
+            if ($photo) {
+                if (!isUrl($photo)) {
+                    $photo = Gdn_Upload::url(changeBasename($photo, 'n%s'));
+                }
+            } else {
+                $photo = UserModel::getDefaultAvatarUrl($session->User);
             }
-         } else {
-            if (function_exists('UserPhotoDefaultUrl'))
-               $Photo = UserPhotoDefaultUrl($Session->User, 'ProfilePhoto');
-            elseif ($ConfigPhoto = C('Garden.DefaultAvatar'))
-               $Photo = Gdn_Upload::Url($ConfigPhoto);
-            else
-               $Photo = Asset('/applications/dashboard/design/images/defaulticon.png', TRUE);
-         }
-         $User['Photo'] = $Photo;
-      } else {
-         $User = FALSE; /*array(
+            $user['Photo'] = $photo;
+        } else {
+            $user = false; /*array(
             'Name' => '',
             'CountNotifications' => 0,
             'SignedIn' => FALSE);*/
-      }
-      $Smarty->assign('User', $User);
+        }
+        $smarty->assign('User', $user);
 
-      // Make sure that any datasets use arrays instead of objects.
-      foreach($Controller->Data as $Key => $Value) {
-         if($Value instanceof Gdn_DataSet) {
-            $Controller->Data[$Key] = $Value->ResultArray();
-         } elseif($Value instanceof stdClass) {
-            $Controller->Data[$Key] = (array)$Value;
-         }
-      }
-      
-      $BodyClass = GetValue('CssClass', $Controller->Data, '', TRUE);
-      $Sections = Gdn_Theme::Section(NULL, 'get');
-      if (is_array($Sections)) {
-         foreach ($Sections as $Section) {
-            $BodyClass .= ' Section-'.$Section;
-         }
-      }
-     
-      $Controller->Data['BodyClass'] = $BodyClass;
+        // Make sure that any datasets use arrays instead of objects.
+        foreach ($controller->Data as $key => $value) {
+            if ($value instanceof Gdn_DataSet) {
+                $controller->Data[$key] = $value->resultArray();
+            } elseif ($value instanceof stdClass) {
+                $controller->Data[$key] = (array)$value;
+            }
+        }
 
-      $Smarty->assign('Assets', (array)$Controller->Assets);
-      $Smarty->assign('Path', Gdn::Request()->Path());
+        $bodyClass = val('CssClass', $controller->Data, '');
+        $sections = Gdn_Theme::section(null, 'get');
+        if (is_array($sections)) {
+            foreach ($sections as $section) {
+                $bodyClass .= ' Section-'.$section;
+            }
+        }
 
-      // Assigign the controller data last so the controllers override any default data.
-      $Smarty->assign($Controller->Data);
+        $controller->Data['BodyClass'] = $bodyClass;
 
-      $Smarty->Controller = $Controller; // for smarty plugins
-      $Smarty->security = TRUE;
-      
-      $Smarty->security_settings['IF_FUNCS'] = array_merge($Smarty->security_settings['IF_FUNCS'],
-         array('Category', 'CheckPermission', 'InSection', 'InCategory', 'MultiCheckPermission', 'GetValue', 'SetValue', 'Url'));
-      
-      $Smarty->security_settings['MODIFIER_FUNCS'] = array_merge($Smarty->security_settings['MODIFIER_FUNCS'],
-         array('sprintf'));
-      
-      $Smarty->secure_dir = array($Path);
-   }   
-   
-   /**
-    * Render the given view.
-    *
-    * @param string $Path The path to the view's file.
-    * @param Controller $Controller The controller that is rendering the view.
-    */
-   public function Render($Path, $Controller) {
-      $Smarty = $this->Smarty();
-      $this->Init($Path, $Controller);
-      $CompileID = $Smarty->compile_id;
-      if (defined('CLIENT_NAME'))
-         $CompileID = CLIENT_NAME;
-      
-      $Smarty->template_dir = dirname($Path);
-      $Smarty->display($Path, NULL, $CompileID);
-   }
+        // Set the current locale for themes to take advantage of.
+        $locale = Gdn::locale()->Locale;
+        $currentLocale = [
+            'Key' => $locale,
+            'Lang' => str_replace('_', '-', Gdn::locale()->language(true)) // mirrors html5 lang attribute
+        ];
+        if (class_exists('Locale')) {
+            $currentLocale['Language'] = Locale::getPrimaryLanguage($locale);
+            $currentLocale['Region'] = Locale::getRegion($locale);
+            $currentLocale['DisplayName'] = Locale::getDisplayName($locale, $locale);
+            $currentLocale['DisplayLanguage'] = Locale::getDisplayLanguage($locale, $locale);
+            $currentLocale['DisplayRegion'] = Locale::getDisplayRegion($locale, $locale);
+        }
+        $smarty->assign('CurrentLocale', $currentLocale);
 
-   /**
-    * @return Smarty The smarty object used for rendering.
-    */
-   public function Smarty() {
-      if(is_null($this->_Smarty)) {
-         $Smarty = Gdn::Factory('Smarty');
+        $smarty->assign('Assets', (array)$controller->Assets);
+        // 2016-07-07 Linc: Request used to return blank for homepage.
+        // Now it returns defaultcontroller. This restores BC behavior.
+        $isHomepage = val('isHomepage', $controller->Data);
+        $path = ($isHomepage) ? "" : Gdn::request()->path();
+        $smarty->assign('Path', $path);
+        $smarty->assign('Homepage', $isHomepage); // true/false
 
-         $Smarty->cache_dir = PATH_CACHE . DS . 'Smarty' . DS . 'cache';
-         $Smarty->compile_dir = PATH_CACHE . DS . 'Smarty' . DS . 'compile';
-         $Smarty->plugins_dir[] = PATH_LIBRARY . DS . 'vendors' . DS . 'SmartyPlugins';
-         
-//         Gdn::PluginManager()->Trace = TRUE;
-         Gdn::PluginManager()->CallEventHandlers($Smarty, 'Gdn_Smarty', 'Init');
-         
-         $this->_Smarty = $Smarty;
-      }
-      return $this->_Smarty;
-   }
-   
-   /** 
-    * See if the provided template causes any errors. 
-    * @param type $Path Path of template file to test.
-    * @return boolean TRUE if template loads successfully.
-    */
-   public function TestTemplate($Path) {
-      $Smarty = $this->Smarty();
-      $this->Init($Path, Gdn::Controller());
-      $CompileID = $Smarty->compile_id;
-      if (defined('CLIENT_NAME'))
-         $CompileID = CLIENT_NAME;
+        // Assign the controller data last so the controllers override any default data.
+        $smarty->assign($controller->Data);
 
-      $Return = TRUE;
-      try {
-         $Result = $Smarty->fetch($Path, NULL, $CompileID);
-         // echo Wrap($Result, 'textarea', array('style' => 'width: 900px; height: 400px;'));
-         $Return = ($Result == '' || strpos($Result, '<title>Fatal Error</title>') > 0 || strpos($Result, '<h1>Something has gone wrong.</h1>') > 0) ? FALSE : TRUE;
-      } catch(Exception $ex) {
-         $Return = FALSE;
-      }
-      return $Return;
-   }
+        $this->enableSecurity($smarty);
+    }
+
+    /**
+     * Render the given view.
+     *
+     * @param string $path The path to the view's file.
+     * @param Gdn_Controller $controller The controller that is rendering the view.
+     */
+    public function render($path, $controller) {
+        $smarty = $this->smarty();
+        $this->init($path, $controller);
+        $compileID = $smarty->compile_id;
+        if (defined('CLIENT_NAME')) {
+            $compileID = CLIENT_NAME;
+        }
+
+        if (strpos($path, ':') === false) {
+            $smarty->setTemplateDir(dirname($path));
+        } else {
+            list($type, $arg) = explode(':', $path, 2);
+            if ($type === 'file') {
+                $smarty->setTemplateDir(dirname($arg));
+            } elseif (!empty($controller->Theme)) {
+                $smarty->setTemplateDir([
+                    PATH_THEMES."/{$controller->Theme}/views",
+                    PATH_ADDONS_THEMES."/{$controller->Theme}/views",
+                ]);
+            }
+        }
+
+        $smarty->display($path, null, $compileID);
+    }
+
+    /**
+     *
+     *
+     * @return Smarty The smarty object used for rendering.
+     */
+    public function smarty() {
+        if (is_null($this->_Smarty)) {
+            $smarty = new SmartyBC();
+
+            $smarty->setCacheDir(PATH_CACHE.'/Smarty/cache');
+            $smarty->setCompileDir(PATH_CACHE.'/Smarty/compile');
+            $smarty->addPluginsDir(PATH_LIBRARY.'/SmartyPlugins');
+            $smarty->setDebugTemplate(PATH_APPLICATIONS.'/dashboard/views/debug.tpl');
+            $smarty->registerPlugin('function', 'debug_vars', [$this, 'debugVars'], false);
+
+//         Gdn::pluginManager()->Trace = TRUE;
+            Gdn::pluginManager()->callEventHandlers($smarty, 'Gdn_Smarty', 'Init');
+
+            $this->_Smarty = $smarty;
+        }
+        return $this->_Smarty;
+    }
+
+    /**
+     * See if the provided template causes any errors.
+     *
+     * @param string $path Path of template file to test.
+     * @return boolean TRUE if template loads successfully.
+     */
+    public function testTemplate($path) {
+        $smarty = $this->smarty();
+        $this->init($path, Gdn::controller());
+        $compileID = $smarty->compile_id;
+        if (defined('CLIENT_NAME')) {
+            $compileID = CLIENT_NAME;
+        }
+
+        $return = true;
+        try {
+            $result = $smarty->fetch($path, null, $compileID);
+            // echo wrap($Result, 'textarea', array('style' => 'width: 900px; height: 400px;'));
+            $return = ($result == '' || strpos($result, '<title>Fatal Error</title>') > 0 || strpos($result, '<h1>Something has gone wrong.</h1>') > 0) ? false : true;
+        } catch (Exception $ex) {
+            $return = false;
+        }
+        return $return;
+    }
+
+    /**
+     * Output template variables.
+     *
+     * @param mixed $params
+     * @param Smarty_Internal_TemplateBase $smarty
+     * @return string
+     */
+    public function debugVars($params, $smarty) {
+        $debug = new Smarty_Internal_Debug();
+        $ptr = $debug->get_debug_vars($smarty);
+        $vars = self::sanitizeVariables($ptr->tpl_vars);
+        ksort($vars);
+
+        $sm = new Smarty();
+        $sm->assign('assigned_vars', $vars);
+        return $sm->fetch(PATH_APPLICATIONS.'/dashboard/views/debug_vars.tpl');
+    }
+
+    /**
+     * Sanitize template variables to remove or obscure sensitive information.
+     *
+     * @param array $vars
+     * @param int $level
+     * @return array
+     */
+    public static function sanitizeVariables(array $vars, int $level = 0): array {
+        $remove = ['password', 'accesstoken', 'fingerprint', 'updatetoken'];
+        $obscure = [
+            'insertipaddress', 'updateipaddress', 'lastipaddress', 'allipaddresses', 'dateofbirth', 'hashmethod',
+            'email', 'firstemail', 'lastemail',
+        ];
+
+        $r = [];
+
+        foreach ($vars as $key => $value) {
+            $lkey = strtolower($key);
+            if (in_array($lkey, $remove, true) || ($level === 0 && $key === 'Assets')) {
+                continue;
+            } elseif (in_array($lkey, $obscure, true)) {
+                $r[$key] = '***OBSCURED***';
+            } elseif (is_array($value)) {
+                $r[$key] = self::sanitizeVariables($value, $level + 1);
+            } elseif ($value instanceof stdClass) {
+                $r[$key] = (object)self::sanitizeVariables((array)$value, $level + 1);
+            } else {
+                $r[$key] = $value;
+            }
+        }
+        return $r;
+    }
+
+    /**
+     * Enable the security features on a Smarty object.
+     *
+     * @param Smarty $smarty
+     */
+    public function enableSecurity(Smarty $smarty): void {
+        $security = new SmartySecurityVanilla($smarty);
+
+        $security->php_handling = Smarty::PHP_REMOVE;
+        $security->allow_constants = false;
+        $security->allow_super_globals = false;
+        $security->streams = null;
+
+        $security->setPhpFunctions(array_merge($security->php_functions, [
+            'array', // Yes, Smarty really blocks this.
+            'category',
+            'categoryUrl',
+            'checkPermission',
+            'commentUrl',
+            'discussionUrl',
+            'inSection',
+            'inCategory',
+            'ismobile',
+            'multiCheckPermission',
+            'getValue',
+            'setValue',
+            'url',
+            'useragenttype',
+            'userUrl',
+        ]));
+
+        $security->php_modifiers = array_merge(
+            $security->php_functions,
+            ['sprintf']
+        );
+
+        $smarty->enableSecurity($security);
+    }
 }

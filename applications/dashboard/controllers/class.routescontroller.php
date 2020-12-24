@@ -1,156 +1,149 @@
-<?php if (!defined('APPLICATION')) exit();
-/*
-Copyright 2008, 2009 Vanilla Forums Inc.
-This file is part of Garden.
-Garden is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-Garden is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
-You should have received a copy of the GNU General Public License along with Garden.  If not, see <http://www.gnu.org/licenses/>.
-Contact Vanilla Forums Inc. at support [at] vanillaforums [dot] com
-*/
-/**
- * Route Controller
- *
- * @package Dashboard
- */
- 
+<?php
 /**
  * Controlling default routes in Garden's MVC dispatcher system.
  *
- * @since 2.0.0
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
  * @package Dashboard
+ * @since 2.0
+ */
+
+/**
+ * Handles /routes endpoint.
  */
 class RoutesController extends DashboardController {
-   /** @var array Models to automatically instantiate. */
-   public $Uses = array('Form');
-   
-   /**
-    * Set menu path. Automatically run on every use.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function Initialize() {
-      parent::Initialize();
-      Gdn_Theme::Section('Dashboard');
-      if ($this->Menu)
-         $this->Menu->HighlightRoute('/dashboard/settings');
-   }
 
-   /**
-    * Create a route.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function Add() {
-      $this->Permission('Garden.Settings.Manage');
-      // Use the edit form with no roleid specified.
-      $this->View = 'Edit';
-      $this->Edit();
-   }
-   
-   /**
-    * Edit a route.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param string $RouteIndex Name of route.
-    */
-   public function Edit($RouteIndex = FALSE) {
-      $this->Permission('Garden.Settings.Manage');
-      $this->AddSideMenu('dashboard/routes');
-      $this->Route = Gdn::Router()->GetRoute($RouteIndex);
-      
-      $Validation = new Gdn_Validation();
-      $ConfigurationModel = new Gdn_ConfigurationModel($Validation);
-      $ConfigurationModel->SetField(array('Route', 'Target', 'Type'));
-      
-      // Set the model on the form.
-      $this->Form->SetModel($ConfigurationModel);
-            
-      // If seeing the form for the first time...
-      if (!$this->Form->AuthenticatedPostBack()) {
-      
-         // Apply the route info to the form.
-         if ($this->Route !== FALSE)
-            $this->Form->SetData(array(
-               'Route'  => $this->Route['Route'], 
-               'Target' => $this->Route['Destination'], 
-               'Type'   => $this->Route['Type']
-            ));
-            
-      } else {
-         // Define some validation rules for the fields being saved
-         $ConfigurationModel->Validation->ApplyRule('Route', 'Required');
-         $ConfigurationModel->Validation->ApplyRule('Target', 'Required');
-         $ConfigurationModel->Validation->ApplyRule('Type', 'Required');
-         
-         // Validate & Save
-         $FormPostValues = $this->Form->FormValues();
-         
-         // Dunno.
-         if ($this->Route['Reserved'])
-            $FormPostValues['Route'] = $this->Route['Route'];
-            
-         if ($ConfigurationModel->Validate($FormPostValues)) {
-            $NewRouteName = ArrayValue('Route', $FormPostValues);
+    /** @var array Models to automatically instantiate. */
+    public $Uses = ['Form'];
 
-            if ($this->Route !== FALSE && $NewRouteName != $this->Route['Route'])
-               Gdn::Router()->DeleteRoute($this->Route['Route']);
-         
-            Gdn::Router()->SetRoute(
-               $NewRouteName,
-               ArrayValue('Target', $FormPostValues),
-               ArrayValue('Type', $FormPostValues)
-            );
+    /**
+     * Set menu path. Automatically run on every use.
+     *
+     * @since 2.0.0
+     * @access public
+     */
+    public function initialize() {
+        parent::initialize();
+        Gdn_Theme::section('Dashboard');
+        if ($this->Menu) {
+            $this->Menu->highlightRoute('/dashboard/settings');
+        }
+    }
 
-            $this->InformMessage(T("The route was saved successfully."));
-            $this->RedirectUrl = Url('dashboard/routes');
-         } else {
-            $this->Form->SetValidationResults($ConfigurationModel->ValidationResults());
-         }
-      }
-      
-      $this->Render();
-   }
-   
-   /**
-    * Remove a route.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param mixed $RouteIndex Name of route.
-    * @param string $TransientKey Security token.
-    */
-   public function Delete($RouteIndex = FALSE, $TransientKey = FALSE) {
-      $this->Permission('Garden.Settings.Manage');
-      $this->DeliveryType(DELIVERY_TYPE_BOOL);
-      $Session = Gdn::Session();
-      
-      // If seeing the form for the first time...
-      if ($TransientKey !== FALSE && $Session->ValidateTransientKey($TransientKey))
-         Gdn::Router()->DeleteRoute($RouteIndex);
-      
-      if ($this->_DeliveryType === DELIVERY_TYPE_ALL)
-         Redirect('dashboard/routes');
+    /**
+     * Create a route.
+     *
+     * @since 2.0.0
+     * @access public
+     */
+    public function add() {
+        $this->permission('Garden.Settings.Manage');
+        // Use the edit form with no roleid specified.
+        $this->View = 'Edit';
+        $this->edit();
+    }
 
-      $this->Render();      
-   }
-   
-   /**
-    * Show list of current routes.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function Index() {
-      $this->Permission('Garden.Settings.Manage');
-      $this->AddSideMenu('dashboard/routes');
-      $this->AddJsFile('routes.js');
-      $this->Title(T('Routes'));
-      
-      $this->MyRoutes = Gdn::Router()->Routes;
-      $this->Render();
-   }
-  
+    /**
+     * Edit a route.
+     *
+     * @param string|false $routeIndex Name of route.
+     */
+    public function edit($routeIndex = false) {
+        $this->permission('Garden.Settings.Manage');
+        $this->setHighlightRoute('dashboard/routes');
+        $this->Route = Gdn::router()->getRoute($routeIndex);
+
+        $validation = new Gdn_Validation();
+        $configurationModel = new Gdn_ConfigurationModel($validation);
+        $configurationModel->setField(['Route', 'Target', 'Type']);
+
+        // Set the model on the form.
+        $this->Form->setModel($configurationModel);
+
+        // If seeing the form for the first time...
+        if (!$this->Form->authenticatedPostBack()) {
+            // Apply the route info to the form.
+            if ($this->Route !== false) {
+                $this->Form->setData([
+                    'Route' => $this->Route['Route'],
+                    'Target' => $this->Route['Destination'],
+                    'Type' => $this->Route['Type']
+                ]);
+            }
+        } else {
+            // Define some validation rules for the fields being saved
+            $configurationModel->Validation->applyRule('Route', 'Required');
+            $configurationModel->Validation->applyRule('Target', 'Required');
+            $configurationModel->Validation->applyRule('Type', 'Required');
+
+            // Validate & Save
+            $formPostValues = $this->Form->formValues();
+
+            // Dunno.
+            if ($this->Route['Reserved']) {
+                $formPostValues['Route'] = $this->Route['Route'];
+            }
+
+            if ($configurationModel->validate($formPostValues)) {
+                $newRouteName = val('Route', $formPostValues);
+
+                if ($this->Route !== false && $newRouteName != $this->Route['Route']) {
+                    Gdn::router()->deleteRoute($this->Route['Route']);
+                }
+
+                Gdn::router()->setRoute(
+                    $newRouteName,
+                    val('Target', $formPostValues),
+                    val('Type', $formPostValues)
+                );
+
+                $this->informMessage(t("The route was saved successfully."));
+                $this->setRedirectTo('dashboard/routes');
+            } else {
+                $this->Form->setValidationResults($configurationModel->validationResults());
+            }
+        }
+
+        $this->render();
+    }
+
+    /**
+     * Remove a route.
+     *
+     * @param mixed $routeIndex Name of route.
+     * @param string|false $transientKey Security token.
+     */
+    public function delete($routeIndex = false, $transientKey = false) {
+        $this->permission('Garden.Settings.Manage');
+        $this->deliveryType(DELIVERY_TYPE_BOOL);
+        $session = Gdn::session();
+
+        // If seeing the form for the first time...
+        if ($transientKey !== false && $session->validateTransientKey($transientKey)) {
+            Gdn::router()->deleteRoute($routeIndex);
+        }
+
+        if ($this->_DeliveryType === DELIVERY_TYPE_ALL) {
+            redirectTo('dashboard/routes');
+        }
+
+        $this->jsonTarget('', '', 'Refresh');
+
+        $this->render();
+    }
+
+    /**
+     * Show list of current routes.
+     *
+     * @since 2.0.0
+     * @access public
+     */
+    public function index() {
+        $this->permission('Garden.Settings.Manage');
+        $this->setHighlightRoute('dashboard/routes');
+        $this->title(t('Routes'));
+
+        $this->MyRoutes = Gdn::router()->Routes;
+        $this->render();
+    }
 }

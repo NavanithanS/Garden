@@ -1,21 +1,22 @@
 <?php if (!defined('APPLICATION')) exit(); ?>
-   <description><?php echo Gdn_Format::Text($this->Head->Title()); ?></description>
-   <language><?php echo Gdn::Config('Garden.Locale', 'en-US'); ?></language>
-   <atom:link href="<?php echo htmlspecialchars(Url($this->SelfUrl, TRUE)); ?>" rel="self" type="application/rss+xml" />
+    <description><?php echo Gdn_Format::text($this->Head->title()); ?></description>
+    <atom:link href="<?php echo htmlspecialchars(url($this->SelfUrl, true)); ?>" rel="self" type="application/rss+xml"/>
 <?php
-$Activities = $this->Data('Activities', array());
+$Activities = $this->data('Activities', []);
 foreach ($Activities as $Activity) {
-   $Author = UserBuilder($Activity, 'Activity');
-?>
-   <item>
-      <title><?php echo Gdn_Format::Text(GetValue('Headline', $Activity)); ?></title>
-      <link><?php echo Url(UserUrl($Author, '', 'activity'), TRUE); ?></link>
-      <pubDate><?php echo date('r', Gdn_Format::ToTimeStamp(GetValue('DateUpdated', $Activity))); ?></pubDate>
-      <dc:creator><?php echo Gdn_Format::Text($Author->Name); ?></dc:creator>
-      <guid isPermaLink="false"><?php echo GetValue('ActivityID', $Activity) . '@' . Url(UserUrl($Author, '', 'activity')); ?></guid>
-      <?php if ($Story = GetValue('Story', $Activity)) : ?>
-      <description><![CDATA[<?php echo Gdn_Format::RssHtml($Story, GetValue('Format', $Activity)); ?>]]></description>
-      <?php endif; ?>
-   </item>
+    $Author = userBuilder($Activity, 'Activity');
+    ?>
+    <item>
+        <title><?php echo Gdn_Format::text(val('Headline', $Activity)); ?></title>
+        <link><?php echo url(userUrl($Author, '', 'activity'), true); ?></link>
+        <pubDate><?php echo date('r', Gdn_Format::toTimeStamp(val('DateUpdated', $Activity))); ?></pubDate>
+        <dc:creator><?php echo Gdn_Format::text($Author->Name); ?></dc:creator>
+        <guid
+            isPermaLink="false"><?php echo val('ActivityID', $Activity).'@'.url(userUrl($Author, '', 'activity')); ?></guid>
+        <?php if ($Story = val('Story', $Activity)) : ?>
+            <description><![CDATA[<?php echo Gdn_Format::rssHtml($Story, val('Format', $Activity)); ?>]]>
+            </description>
+        <?php endif; ?>
+    </item>
 <?php
 }

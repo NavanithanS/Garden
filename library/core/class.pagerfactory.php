@@ -1,27 +1,38 @@
-<?php if (!defined('APPLICATION')) exit();
-
+<?php
 /**
- * Handles creating and returning a pager
+ * Gdn_PagerFactory.
  *
  * @author Mark O'Sullivan <markm@vanillaforums.com>
- * @author Todd Burry <todd@vanillaforums.com> 
- * @copyright 2003 Vanilla Forums, Inc
- * @license http://www.opensource.org/licenses/gpl-2.0.php GPL
- * @package Garden
+ * @author Todd Burry <todd@vanillaforums.com>
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
+ * @package Core
  * @since 2.0
  */
 
+/**
+ * Handles creating and returning a pager.
+ */
 class Gdn_PagerFactory {
 
-   public function GetPager($PagerType, $Sender) {
-      $PagerType = $PagerType.'Module';
-         
-      if (!class_exists($PagerType))
-         $PagerType = 'PagerModule';
+    /**
+     *
+     *
+     * @param $pagerType
+     * @param $sender
+     * @return bool
+     */
+    public function getPager($pagerType, $sender) {
+        $pagerType = $pagerType.'Module';
 
-      if (!class_exists($PagerType))
-         return FALSE;
+        if (!class_exists($pagerType)) {
+            $pagerType = 'PagerModule';
+        }
 
-      return new $PagerType($Sender);
-   }
+        if (!class_exists($pagerType)) {
+            return false;
+        }
+
+        return new $pagerType($sender);
+    }
 }

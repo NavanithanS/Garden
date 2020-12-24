@@ -1,57 +1,58 @@
-<?php if (!defined('APPLICATION')) exit();
-/*
-Copyright 2008, 2009 Vanilla Forums Inc.
-This file is part of Garden.
-Garden is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-Garden is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
-You should have received a copy of the GNU General Public License along with Garden.  If not, see <http://www.gnu.org/licenses/>.
-Contact Vanilla Forums Inc. at support [at] vanillaforums [dot] com
-*/
+<?php
+/**
+ * Settings module.
+ *
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
+ * @package Dashboard
+ * @since 2.0
+ */
 
 /**
  * Varies functions related to Settings
  */
 class SettingsModule extends Gdn_Module {
-   
-   const TYPE_APPLICATION = 'application';
-   const TYPE_PLUGIN      = 'plugin';
-   const TYPE_THEME       = 'theme';
-   
-   /**
-    * Is the application/plugin/theme removable?
-    *
-    * @param string $Type self::TYPE_APPLICATION or self::TYPE_PLUGIN or self::TYPE_THEME
-    * @param string $Name 
-    * @return boolean
-    */
-   public static function IsRemovable($Type, $Name) {
-      
-      switch ($Type) {
-         case self::TYPE_APPLICATION:
-            $ApplicationManager = Gdn::Factory('ApplicationManager');
-            
-            if ($IsRemovable = !array_key_exists($Name, $ApplicationManager->EnabledApplications())) {
-               $ApplicationInfo   = ArrayValue($Name, $ApplicationManager->AvailableApplications(), array());
-               $ApplicationFolder = ArrayValue('Folder', $ApplicationInfo, '');
-               
-               $IsRemovable = IsWritable(PATH_APPLICATIONS . DS . $ApplicationFolder);
-            }
-         break;
-         case self::TYPE_PLUGIN:
-            if ($IsRemovable = !array_key_exists($Name, Gdn::PluginManager()->EnabledPlugins())) {
-               $PluginInfo   = ArrayValue($Name, Gdn::PluginManager()->AvailablePlugins(), FALSE);
-               $PluginFolder = ArrayValue('Folder', $PluginInfo, FALSE);
-               
-               $IsRemovable = IsWritable(PATH_PLUGINS . DS . $PluginFolder);
-            }
-         break;
-         case self::TYPE_THEME:
-            // TODO
-            $IsRemovable = FALSE;
-         break;
-      }
-      
-      return $IsRemovable;
-   }
 
+    const TYPE_APPLICATION = 'application';
+
+    const TYPE_PLUGIN = 'plugin';
+
+    const TYPE_THEME = 'theme';
+
+    /**
+     * Is the application/plugin/theme removable?
+     *
+     * @param string $type self::TYPE_APPLICATION or self::TYPE_PLUGIN or self::TYPE_THEME
+     * @param string $name
+     * @return boolean
+     */
+    public static function isRemovable($type, $name) {
+
+        switch ($type) {
+            case self::TYPE_APPLICATION:
+                $applicationManager = Gdn::factory('ApplicationManager');
+
+                if ($isRemovable = !array_key_exists($name, $applicationManager->enabledApplications())) {
+                    $applicationInfo = val($name, $applicationManager->availableApplications(), []);
+                    $applicationFolder = val('Folder', $applicationInfo, '');
+
+                    $isRemovable = isWritable(PATH_APPLICATIONS.DS.$applicationFolder);
+                }
+                break;
+            case self::TYPE_PLUGIN:
+                if ($isRemovable = !array_key_exists($name, Gdn::pluginManager()->enabledPlugins())) {
+                    $pluginInfo = val($name, Gdn::pluginManager()->availablePlugins(), false);
+                    $pluginFolder = val('Folder', $pluginInfo, false);
+
+                    $isRemovable = isWritable(PATH_PLUGINS.DS.$pluginFolder);
+                }
+                break;
+            case self::TYPE_THEME:
+                // TODO
+                $isRemovable = false;
+                break;
+        }
+
+        return $isRemovable;
+    }
 }

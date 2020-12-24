@@ -1,41 +1,84 @@
-<?php if (!defined('APPLICATION')) exit();
-/*
-Copyright 2008, 2009 Vanilla Forums Inc.
-This file is part of Garden.
-Garden is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-Garden is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
-You should have received a copy of the GNU General Public License along with Garden.  If not, see <http://www.gnu.org/licenses/>.
-Contact Vanilla Forums Inc. at support [at] vanillaforums [dot] com
-*/
+<?php
+/**
+ * Category Moderators module
+ *
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
+ * @package Vanilla
+ * @since 2.0
+ */
 
 /**
  * Renders the moderators in the specified category. Built for use in a side panel.
  */
 class CategoryModeratorsModule extends Gdn_Module {
-   
-   public function __construct($Sender = '') {
-      parent::__construct($Sender);
-      $this->ModeratorData = FALSE;
-   }
-   
-   public function GetData($Category) {
-      $this->ModeratorData = array($Category);
-      CategoryModel::JoinModerators($this->ModeratorData);
-   }
 
-   public function AssetTarget() {
-      return 'Panel';
-   }
+    /**
+     * CategoryModeratorsModule constructor.
+     *
+     * @param object|string $sender
+     * @param bool $applicationFolder
+     */
+    public function __construct($sender = '', $applicationFolder = false) {
+        parent::__construct($sender, $applicationFolder);
+    }
 
-   public function ToString() {
-      if (
-         is_array($this->ModeratorData)
-         && count($this->ModeratorData) > 0
-         && is_array($this->ModeratorData[0]->Moderators)
-         && count($this->ModeratorData[0]->Moderators) > 0
-      )
-         return parent::ToString();
+    /**
+     * Load the data for this module.
+     *
+     * @param array|object|null $category
+     */
+    protected function getData($category = null) {
+        $data = $this->data('Moderators', null);
 
-      return '';
-   }
+        // Only attempt to fetch data if we do not already have it.
+        if ($data === null) {
+            $data = false;
+
+            // If we received a category, try to use it. If not, try to pull one from the current controller.
+            if ($category === null) {
+                $controller = Gdn::controller();
+                $category = $controller->data('Category');
+            } elseif (!is_array($category)) {
+                $category = (array)$category;
+            }
+
+            // Moderators are fetched via the PermissionCategoryID property. Make sure we have it.
+            $hasPermissionCategoryID = val('PermissionCategoryID', $category) !== false;
+            if ($hasPermissionCategoryID) {
+                // CategoryModel::joinModerators expects an array of category records.
+                $category = [$category];
+                CategoryModel::joinModerators($category);
+                $moderators = val('Moderators', $category[0]);
+                if (is_array($moderators) && count($moderators) > 0) {
+                    // Success. Stash the moderators.
+                    $data = $moderators;
+                }
+            }
+
+            $this->setData('Moderators', $data);
+        }
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function assetTarget() {
+        return 'Panel';
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function toString() {
+        $result = '';
+        $this->getData();
+
+        $moderators = $this->data('Moderators');
+        if (is_array($moderators)) {
+            $result = parent::toString();
+        }
+
+        return $result;
+    }
 }

@@ -1,56 +1,84 @@
 <?php if (!defined('APPLICATION')) exit();
-$Advanced = TRUE;
+
+$desc = t('Roles determine user\'s permissions.', 'Every user in your site is assigned to at least one role. Roles are used to determine what the users are allowed to do.');
+
+$links = '<ul>';
+$links .= wrap(anchor(t("Video tutorial on managing roles &amp; permissions"), 'settings/tutorials/roles-and-permissions'), 'li');
+$links .= wrap(anchor('Default Role Types', 'https://success.vanillaforums.com/kb/articles/39-roles-permissions#default-types'), 'li');
+$links .= '</ul>';
+
+helpAsset(sprintf(t('About %s'), t('Roles & Permissions')), $desc);
+helpAsset(t('Need More Help?'), $links)
+
 ?>
-<div class="Help Aside">
-   <?php
-   echo Wrap(T('Need More Help?'), 'h2');
-   echo '<ul>';
-   echo Wrap(Anchor(T("Video tutorial on managing roles &amp; permissions"), 'settings/tutorials/roles-and-permissions'), 'li');
-   echo '</ul>';
-   ?>
-</div>
-<h1><?php echo T('Manage Roles & Permissions'); ?></h1>
 <?php
-echo $this->Form->Open();
-$this->DefaultRolesWarning();
-?>
-<div class="Info"><?php
-   echo T('Roles determine user\'s permissions.', 'Every user in your site is assigned to at least one role. Roles are used to determine what the users are allowed to do.');
-   $this->FireEvent('AfterRolesInfo');
-?></div>
-<?php if ($Advanced) { ?>
-<div class="FilterMenu"><?php echo Anchor(T('Add Role'), 'dashboard/role/add', 'SmallButton'); ?></div>
-<?php } ?>
-<table border="0" cellpadding="0" cellspacing="0" class="AltColumns Sortable" id="RoleTable">
-   <thead>
-      <tr id="0">
-         <th><?php echo T('Role'); ?></th>
-         <th class="Alt"><?php echo T('Description'); ?></th>
-      </tr>
-   </thead>
-   <tbody>
-<?php
-$Alt = FALSE;
-foreach ($this->Data('Roles') as $Role) {
-   $Alt = $Alt ? FALSE : TRUE;
-   ?>
-   <tr id="<?php echo $Role['RoleID']; ?>"<?php echo $Alt ? ' class="Alt"' : ''; ?>>
-      <td class="Info">
-         <strong><?php echo $Role['Name']; ?></strong>
-         <?php if ($Advanced) { ?>
-         <div>
-            <?php
-            echo Anchor(T('Edit'), "/role/edit/{$Role['RoleID']}", 'SmallButton');
-            if ($Role['Deletable'])
-               echo Anchor(T('Delete'), "/role/delete/{$Role['RoleID']}", 'Popup SmallButton');
+echo heading(
+    t('Manage Roles & Permissions'),
+    [
+        [
+            'text' => dashboardSymbol('settings'),
+            'url' => '/role/advanced',
+            'attributes' => [
+                'class' => 'btn btn-icon-border js-modal',
+                'title' => t('Advanced Settings'),
+                'aria-label' => t('Advanced Settings'),
+                'data-reload-page-on-save' => false
+            ]
+        ],
+        [
+            'text' => t('Add Role'),
+            'url' => 'dashboard/role/add',
+        ],
+    ]
+);
+$this->fireEvent('AfterRolesInfo'); ?>
+<?php echo $this->Form->open(); ?>
+<div class="table-wrap">
+    <table border="0" cellpadding="0" cellspacing="0" class="table-data js-tj Sortable" id="RoleTable">
+        <thead>
+        <tr id="0">
+            <th><?php echo t('Role'); ?></th>
+            <th class="column-xl"><?php echo t('Description'); ?></th>
+            <th><?php echo t('Default Type'); ?></th>
+            <th><?php echo t('Users'); ?></th>
+            <th class="options column-sm"></th>
+        </tr>
+        </thead>
+        <tbody>
+        <?php
+        $Alt = false;
+        foreach ($this->data('Roles') as $Role) {
+            $Alt = !$Alt;
             ?>
-         </div>
-         <?php } ?>
-      </td>
-      <td class="Alt"><?php echo $Role['Description']; ?></td>
-   </tr>
-<?php } ?>
-   </tbody>
-</table>
+            <tr id="<?php echo $Role['RoleID']; ?>"<?php echo $Alt ? ' class="Alt"' : ''; ?>>
+                <td>
+                    <?php echo htmlEsc($Role['Name']); ?>
+                </td>
+                <td>
+                    <?php echo htmlEsc($Role['Description']); ?>
+                </td>
+                <td>
+                    <?php if (val('Type', $Role)) {
+                        echo htmlEsc(t(val('Type', $Role)));
+                    } ?>
+                </td>
+                <td><?php echo anchor($Role['CountUsers'] ?: 0, '/dashboard/user?Keywords='.urlencode($Role['Name'])); ?></td>
+                <td class="options">
+                    <div class="btn-group">
+                    <?php
+                    if ($Role['CanModify']) {
+                        echo anchor(dashboardSymbol('edit'), "/role/edit/{$Role['RoleID']}", 'btn btn-icon', ['aria-label' => t('Edit'), 'title' => t('Edit')]);
+                        if ($Role['Deletable']) {
+                            echo anchor(dashboardSymbol('delete'), "/role/delete/{$Role['RoleID']}", 'js-modal btn btn-icon', ['aria-label' => t('Delete'), 'title' => t('Delete')]);
+                        }
+                    }
+                    ?>
+                    </div>
+                </td>
+            </tr>
+        <?php } ?>
+        </tbody>
+    </table>
+</div>
 <?php
-echo $this->Form->Close();
+echo $this->Form->close();

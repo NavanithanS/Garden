@@ -1,1404 +1,2392 @@
-<?php if (!defined('APPLICATION')) exit();
-/*
-Copyright 2008, 2009 Vanilla Forums Inc.
-This file is part of Garden.
-Garden is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-Garden is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
-You should have received a copy of the GNU General Public License along with Garden.  If not, see <http://www.gnu.org/licenses/>.
-Contact Vanilla Forums Inc. at support [at] vanillaforums [dot] com
-*/
+<?php
 /**
- * Activity Model
+ * Activity Model.
  *
+ * @copyright 2009-2020 Vanilla Forums Inc.
+ * @license GPL-2.0-only
  * @package Dashboard
+ * @since 2.0
  */
- 
+
+use Garden\EventManager;
+use Garden\Events\ResourceEvent;
+use Garden\Schema\Schema;
+use PHPMailer\PHPMailer\PHPMailer;
+use Psr\EventDispatcher\EventDispatcherInterface;
+use Psr\Log\LoggerInterface;
+use Psr\SimpleCache\CacheInterface;
+use Vanilla\Dashboard\Models\ActivityEmail;
+use Vanilla\Formatting\Formats\TextFormat;
+use Vanilla\Formatting\Formats;
+use Vanilla\Formatting\FormatService;
+use Vanilla\Dashboard\Events\NotificationEvent;
+use Vanilla\Models\UserFragmentSchema;
+use Vanilla\Utility\CamelCaseScheme;
+
 /**
  * Activity data management.
- *
- * @since 2.0.0
- * @package Dashboard
  */
 class ActivityModel extends Gdn_Model {
-   const NOTIFY_PUBLIC = -1;
-   const NOTIFY_MODS = -2;
-   const NOTIFY_ADMINS = -3;
-   
-   const SENT_ARCHIVE = 1; // The activity was added before this system was put in place.
-   const SENT_OK = 2; // The activity sent just fine.
-   const SENT_PENDING = 3; // The activity is waiting to be sent.
-   const SENT_FAIL = 4; // The activity could not be sent.
-   const SENT_ERROR = 5; // There was an error sending the activity, but it can be retried.
-   const SENT_INPROGRESS = 31; // Sending is in progress.
-   
-   public static $ActivityTypes = NULL;
-   public static $Queue = array();
-   public static $MaxMergeCount = 10;
-   
-   /**
-    * Defines the related database table name.
-    */
-   public function __construct() {
-      parent::__construct('Activity');
-   }
-   
-   /**
-    * Build basis of common activity SQL query.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function ActivityQuery($Join = TRUE) {
-      $this->SQL
-         ->Select('a.*')
-         ->Select('t.FullHeadline, t.ProfileHeadline, t.AllowComments, t.ShowIcon, t.RouteCode')
-         ->Select('t.Name', '', 'ActivityType')
-         ->From('Activity a')
-         ->Join('ActivityType t', 'a.ActivityTypeID = t.ActivityTypeID');
-      
-      if ($Join) {
-         $this->SQL
-            ->Select('au.Name', '', 'ActivityName')
-            ->Select('au.Gender', '', 'ActivityGender')
-            ->Select('au.Photo', '', 'ActivityPhoto')
-            ->Select('au.Email', '', 'ActivityEmail')
-            ->Select('ru.Name', '', 'RegardingName')
-            ->Select('ru.Gender', '', 'RegardingGender')
-            ->Select('ru.Email', '', 'RegardingEmail')
-            ->Select('ru.Photo', '', 'RegardingPhoto')
-            ->Join('User au', 'a.ActivityUserID = au.UserID')
-            ->Join('User ru', 'a.RegardingUserID = ru.UserID', 'left');
-      }
-         
-      $this->FireEvent('AfterActivityQuery');
-   }
-   
-   public function CalculateData(&$Data) {
-      foreach ($Data as &$Row) {
-         $this->CalculateRow($Row);
-      }
-   }
-   
-   public function CalculateRow(&$Row) {
-      $ActivityType = self::GetActivityType($Row['ActivityTypeID']);
-      $Row['ActivityType'] = GetValue('Name', $ActivityType);
-      if (is_string($Row['Data']))
-         $Row['Data'] = @unserialize($Row['Data']);
-      
-      $Row['PhotoUrl'] = Url($Row['Route'], TRUE);
-      if (!$Row['Photo']) {
-         if (isset($Row['ActivityPhoto'])) {
-            $Row['Photo'] = $Row['ActivityPhoto'];
-            $Row['PhotoUrl'] = UserUrl($Row, 'Activity');
-         } else {
-            $User = Gdn::UserModel()->GetID($Row['ActivityUserID'], DATASET_TYPE_ARRAY);
-            if ($User) {
-               $Photo = $User['Photo'];
-               $Row['PhotoUrl'] = UserUrl($User);
-               if (!$Photo || StringBeginsWith($Photo, 'http'))
-                  $Row['Photo'] = $Photo;
-               else
-                  $Row['Photo'] = Gdn_Upload::Url(ChangeBasename($Photo, 'n%s'));
-            }
-         }
-      }
-      
-      $Data = $Row['Data'];
-      if (isset($Data['ActivityUserIDs'])) {
-         $Row['ActivityUserID'] = array_merge(array($Row['ActivityUserID']), $Data['ActivityUserIDs']);
-         $Row['ActivityUserID_Count'] = GetValue('ActivityUserID_Count', $Data);
-      }
-      
-      if (isset($Data['RegardingUserIDs'])) {
-         $Row['RegardingUserID'] = array_merge(array($Row['RegardingUserID']), $Data['RegardingUserIDs']);
-         $Row['RegardingUserID_Count'] = GetValue('RegardingUserID_Count', $Data);
-      }
-      
-      
-      $Row['Url'] = ExternalUrl($Row['Route']);
-      
-      if ($Row['HeadlineFormat']) {
-         $Row['Headline'] = FormatString($Row['HeadlineFormat'], $Row);
-      } else {
-         $Row['Headline'] = Gdn_Format::ActivityHeadline($Row);
-      }
-   }
-   
-   /**
-    * Define a new activity type.
-    * @param string $Name The string code of the activity type.
-    * @param array $Activity The data that goes in the ActivityType table.
-    * @since 2.1
-    */
-   public function DefineType($Name, $Activity = array()) {
-      $this->SQL->Replace('ActivityType', $Activity, array('Name' => $Name), TRUE);
-   }
-   
-   /**
-    * Delete a particular activity item.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param int $ActivityID Unique ID of acitivity to be deleted.
-    */
-   public function Delete($ActivityID, $Options = array()) {
-      // Get the activity first.
-      $Activity = $this->GetID($ActivityID);
-      if ($Activity) {
-         // Log the deletion.
-         $Log = GetValue('Log', $Options);
-         if ($Log) {
-            LogModel::Insert($Log, 'Activity', $Activity);
-         }
-         
-         // Delete comments on the activity item
-         $this->SQL->Delete('ActivityComment', array('ActivityID' => $ActivityID));
-         
-         // Delete the activity item
-         parent::Delete(array('ActivityID' => $ActivityID));
-      }
-   }
-   
-   /**
-    *
-    * @param int $ID 
-    * @since 2.1
-    */
-   public function DeleteComment($ID) {
-      return $this->SQL->Delete('ActivityComment', array('ActivityCommentID' => $ID));
-   }
 
-   /**
-    * Modifies standard Gdn_Model->GetWhere to use AcitivityQuery.
-    *
-    * Events: AfterGet.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param array $Where The where condition.
-    * @param int $Offset The offset of the query.
-    * @param int $Limit the limit of the query.
-    * @return DataSet SQL results.
-    */
-   public function GetWhere($Where, $Offset = 0, $Limit = 30) {
-      if (is_string($Where)) {
-         $Where = array($Where => $Offset);
-         $Offset = 0;
-      }
+    use \Vanilla\FloodControlTrait;
 
-      // Add the basic activity query.
-      $this->SQL
-         ->Select('a2.*')
-         ->Select('t.FullHeadline, t.ProfileHeadline, t.AllowComments, t.ShowIcon, t.RouteCode')
-         ->Select('t.Name', '', 'ActivityType')
-         ->From('Activity a')
-         ->Join('Activity a2', 'a.ActivityID = a2.ActivityID') // self-join for index speed.
-         ->Join('ActivityType t', 'a2.ActivityTypeID = t.ActivityTypeID');
-      
-      // Add prefixes to the where.
-      foreach ($Where as $Key => $Value) {
-         if (strpos($Key, '.') === FALSE) {
-            $Where['a.'.$Key] = $Value;
-            unset($Where[$Key]);
-         }
-      }
-      
-      $Result = $this->SQL
-         ->Where($Where)
-         ->OrderBy('a.DateUpdated', 'desc')
-         ->Limit($Limit, $Offset)
-         ->Get();
-      
-      self::GetUsers($Result->ResultArray());
-      Gdn::UserModel()->JoinUsers($Result->ResultArray(), array('ActivityUserID', 'RegardingUserID'), array('Join' => array('Name', 'Email', 'Gender', 'Photo')));
-      $this->CalculateData($Result->ResultArray());
-      
-      $this->EventArguments['Data'] =& $Result;
-      $this->FireEvent('AfterGet');
-      
-      return $Result;
-   }
-   
-   /**
-    * @param type $Activities 
-    * @since 2.1
-    */
-   public function JoinComments(&$Activities) {
-      // Grab all of the activity IDs.
-      $ActivityIDs = array();
-      foreach ($Activities as $Activity) {
-         if ($ID = GetValue('CommentActivityID', $Activity['Data'])) {
-            // This activity shares its comments with another activity.
-            $ActivityIDs[] = $ID;
-         } else {
-            $ActivityIDs[] = $Activity['ActivityID'];
-         }
-      }
-      $ActivityIDs = array_unique($ActivityIDs);
-      
-      $Comments = $this->GetComments($ActivityIDs);
-      $Comments = Gdn_DataSet::Index($Comments, array('ActivityID'), array('Unique' => FALSE));
-      foreach ($Activities as &$Activity) {
-         $ID = GetValue('CommentActivityID', $Activity['Data']);
-         if (!$ID)
-            $ID = $Activity['ActivityID'];
-         
-         if (isset($Comments[$ID])) {
-            $Activity['Comments'] = $Comments[$ID];
-         } else {
-            $Activity['Comments'] = array();
-         }
-      }
-   }
-   
-   /**
-    * Modifies standard Gdn_Model->Get to use AcitivityQuery.
-    *
-    * Events: BeforeGet, AfterGet.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param int $NotifyUserID Unique ID of user to gather activity for or one of the NOTIFY_* constants in this class.
-    * @param int $Offset Number to skip.
-    * @param int $Limit How many to return.
-    * @return DataSet SQL results.
-    */
-   public function Get($NotifyUserID = FALSE, $Offset = 0, $Limit = 30) {
-      $Offset = is_numeric($Offset) ? $Offset : 0;
-      if ($Offset < 0)
-         $Offset = 0;
+    /** Maximum length of activity story excerpts. */
+    private const DEFAULT_EXCERPT_LENGTH = 160;
 
-      $Limit = is_numeric($Limit) ? $Limit : 0;
-      if ($Limit < 0)
-         $Limit = 30;
+    /** @var string Cache key for user notification count. */
+    private const NOTIFICATIONS_COUNT_CACHE_KEY = "notificationCount/users/%s";
 
-      $this->ActivityQuery(FALSE);
-      
-      if (!$NotifyUserID) {
-         $NotifyUserID = self::NOTIFY_PUBLIC;
-      }
-      $this->SQL->WhereIn('NotifyUserID', (array)$NotifyUserID);
+    /** @var int Cache time for user notification count. */
+    private const NOTIFICATION_COUNT_TTL = 10; // 10 seconds.
 
-      $this->FireEvent('BeforeGet');
-      $Result = $this->SQL
-         ->OrderBy('a.ActivityID', 'desc')
-         ->Limit($Limit, $Offset)
-         ->Get();
-      
-      Gdn::UserModel()->JoinUsers($Result, array('ActivityUserID', 'RegardingUserID'), array('Join' => array('Name', 'Photo', 'Email', 'Gender')));
+    /** Activity notification level: Everyone. */
+    const NOTIFY_PUBLIC = -1;
 
-      $this->EventArguments['Data'] =& $Result;
-      $this->FireEvent('AfterGet');
-      
-      return $Result;
-   }
-   
-   public static function GetUsers(&$Data) {
-      $UserIDs = array();
-      
-      foreach ($Data as &$Row) {
-         if (is_string($Row['Data']))
-            $Row['Data'] = @unserialize($Row['Data']);
-         
-         $UserIDs[$Row['ActivityUserID']] = 1;
-         $UserIDs[$Row['RegardingUserID']] = 1;
-         
-         if (isset($Row['Data']['ActivityUserIDs'])) {
-            foreach ($Row['Data']['ActivityUserIDs'] as $UserID) {
-               $UserIDs[$UserID] = 1;
-            }
-         }
-         
-         if (isset($Row['Data']['RegardingUserIDs'])) {
-            foreach ($Row['Data']['RegardingUserIDs'] as $UserID) {
-               $UserIDs[$UserID] = 1;
-            }
-         }
-      }
-      
-      Gdn::UserModel()->GetIDs(array_keys($UserIDs));
-   }
-   
-   public static function GetActivityType($ActivityType) {
-      if (self::$ActivityTypes === NULL) {
-         $Data = Gdn::SQL()->Get('ActivityType')->ResultArray();
-         foreach ($Data as $Row) {
-            self::$ActivityTypes[$Row['Name']] = $Row;
-            self::$ActivityTypes[$Row['ActivityTypeID']] = $Row;
-         }
-      }
-      if (isset(self::$ActivityTypes[$ActivityType]))
-         return self::$ActivityTypes[$ActivityType];
-      return FALSE;
-   }
-   
-   /**
-    * Get number of activity related to a user.
-    *
-    * Events: BeforeGetCount.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param string $UserID Unique ID of user.
-    * @return int Number of activity items found.
-    */
-   public function GetCount($UserID = '') {
-      $this->SQL
-         ->Select('a.ActivityID', 'count', 'ActivityCount')
-         ->From('Activity a')
-         ->Join('ActivityType t', 'a.ActivityTypeID = t.ActivityTypeID');
-      
-      if ($UserID != '') {
-         $this->SQL
-            ->BeginWhereGroup()
-            ->Where('a.ActivityUserID', $UserID)
-            ->OrWhere('a.RegardingUserID', $UserID)
-            ->EndWhereGroup();
-      }
-      
-      $Session = Gdn::Session();
-      if (!$Session->IsValid() || $Session->UserID != $UserID)
-         $this->SQL->Where('t.Public', '1');
+    /** Activity notification level: Moderators & admins. */
+    const NOTIFY_MODS = -2;
 
-      $this->FireEvent('BeforeGetCount');
-      return $this->SQL
-         ->Get()
-         ->FirstRow()
-         ->ActivityCount;
-   }
-   
-   /**
-    * Get activity related to a particular role.
-    *
-    * Events: AfterGet.
-    *
-    * @since 2.0.18
-    * @access public
-    * @param string $RoleID Unique ID of role.
-    * @param int $Offset Number to skip.
-    * @param int $Limit Max number to return.
-    * @return DataSet SQL results.
-    */
-   public function GetForRole($RoleID = '', $Offset = '0', $Limit = '50') {
-      if (!is_array($RoleID))
-         $RoleID = array($RoleID);
-      
-      $Offset = is_numeric($Offset) ? $Offset : 0;
-      if ($Offset < 0)
-         $Offset = 0;
+    /** Activity notification level: Admins-only. */
+    const NOTIFY_ADMINS = -3;
 
-      $Limit = is_numeric($Limit) ? $Limit : 0;
-      if ($Limit < 0)
-         $Limit = 0;
-      
-      $this->ActivityQuery();
-      $Result = $this->SQL
-         ->Join('UserRole ur', 'a.ActivityUserID = ur.UserID')
-         ->WhereIn('ur.RoleID', $RoleID)
-         ->Where('t.Public', '1')
-         ->OrderBy('a.DateInserted', 'desc')
-         ->Limit($Limit, $Offset)
-         ->Get();
-         
-      $this->EventArguments['Data'] =& $Result;
-      $this->FireEvent('AfterGet');
-      
-      return $Result;
-   }
-   
-   /**
-    * Get number of activity related to a particular role.
-    *
-    * @since 2.0.18
-    * @access public
-    * @param int $RoleID Unique ID of role.
-    * @return int Number of activity items.
-    */
-   public function GetCountForRole($RoleID = '') {
-      if (!is_array($RoleID))
-         $RoleID = array($RoleID);
-      
-      return $this->SQL
-         ->Select('a.ActivityID', 'count', 'ActivityCount')
-         ->From('Activity a')
-         ->Join('ActivityType t', 'a.ActivityTypeID = t.ActivityTypeID')
-         ->Join('UserRole ur', 'a.ActivityUserID = ur.UserID')
-         ->WhereIn('ur.RoleID', $RoleID)
-         ->Where('t.Public', '1')
-         ->Get()
-         ->FirstRow()
-         ->ActivityCount;
-   }
-   
-   /**
-    * Get a particular activity record.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param int $ActivityID Unique ID of activity item.
-    * @return array|object A single SQL result.
-    */
-   public function GetID($ActivityID, $DataType = FALSE) {
-      $Activity = parent::GetID($ActivityID, $DataType);
-      if ($Activity) {
-         $this->CalculateRow($Activity);
-         $Activities = array($Activity);
-         self::JoinUsers($Activities);
-         $Activity = array_pop($Activities);
-      }
-      
-      return $Activity;
-   }
-   
-   /**
-    * Get notifications for a user.
-    *
-    * Events: BeforeGetNotifications.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param int $NotifyUserID Unique ID of user.
-    * @param int $Offset Number to skip.
-    * @param int $Limit Max number to return.
-    * @return DataSet SQL results.
-    */
-   public function GetNotifications($NotifyUserID, $Offset = '0', $Limit = '30') {
-      $this->ActivityQuery(FALSE);
-      $this->FireEvent('BeforeGetNotifications');
-      $Result = $this->SQL
-         ->Where('NotifyUserID', $NotifyUserID)
-         ->Limit($Limit, $Offset)
-         ->OrderBy('a.ActivityID', 'desc')
-         ->Get();
-      $Result->DatasetType(DATASET_TYPE_ARRAY);
-      
-      self::GetUsers($Result->ResultArray());
-      Gdn::UserModel()->JoinUsers($Result->ResultArray(), array('ActivityUserID', 'RegardingUserID'), array('Join' => array('Name', 'Photo', 'Email', 'Gender')));
-      $this->CalculateData($Result->ResultArray());
-      
-      return $Result;
-   }
-   
-   /**
-    * Get notifications for a user since designated ActivityID.
-    *
-    * Events: BeforeGetNotificationsSince.
-    *
-    * @since 2.0.18
-    * @access public
-    * @param int $UserID Unique ID of user.
-    * @param int $LastActivityID ID of activity to start at.
-    * @param array $FilterToActivityTypeIDs Limits returned activity to particular types.
-    * @param int $Limit Max number to return.
-    * @return DataSet SQL results.
-    */
-   public function GetNotificationsSince($UserID, $LastActivityID, $FilterToActivityTypeIDs = '', $Limit = '5') {
-      $this->ActivityQuery();
-      $this->FireEvent('BeforeGetNotificationsSince');
-		if (is_array($FilterToActivityTypeIDs))
-			$this->SQL->WhereIn('a.ActivityTypeID', $FilterToActivityTypeIDs);
-      else
-         $this->SQL->Where('t.Notify', '1');
-		
-      $Result = $this->SQL
-         ->Where('RegardingUserID', $UserID)
-         ->Where('a.ActivityID >', $LastActivityID)
-         ->Limit($Limit, 0)
-         ->OrderBy('a.ActivityID', 'desc')
-         ->Get();
+    /** Activity status: The activity was added before this system was put in place. */
+    const SENT_ARCHIVE = 1;
 
-      return $Result;
-   }
-   
-   /**
-    * Get number of notifications for a user.
-    *
-    * Events: BeforeGetNotificationsCount.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param int $UserID Unique ID of user.
-    * @return int Number of notifications.
-    */
-   /*public function GetCountNotifications($UserID) {
-      $this->SQL
-         ->Select('a.ActivityID', 'count', 'ActivityCount')
-         ->From('Activity a')
-         ->Join('ActivityType t', 'a.ActivityTypeID = t.ActivityTypeID');
-         
-      $this->FireEvent('BeforeGetNotificationsCount');
-      return $this->SQL
-         ->Where('RegardingUserID', $UserID)
-         ->Where('t.Notify', '1')
-         ->Get()
-         ->FirstRow()
-         ->ActivityCount;
-   }*/
-   
-   public function GetComment($ID) {
-      $Activity = $this->SQL->GetWhere('ActivityComment', array('ActivityCommentID' => $ID))->ResultArray();
-      if ($Activity) {
-         Gdn::UserModel()->JoinUsers($Activity, array('InsertUserID'), array('Join' => array('Name', 'Photo', 'Email')));
-         return array_shift($Activity);
-      }
-      return FALSE;
-   }
-   
-   /**
-    * Get comments related to designated activity items.
-    *
-    * Events: BeforeGetComments.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param array $ActivityIDs IDs of activity items.
-    * @return DataSet SQL results.
-    */
-   public function GetComments($ActivityIDs) {
-      $Result = $this->SQL
-         ->Select('c.*')
-         ->From('ActivityComment c')
-         ->WhereIn('c.ActivityID', $ActivityIDs)
-         ->OrderBy('c.ActivityID, c.DateInserted')
-         ->Get()->ResultArray();
-      Gdn::UserModel()->JoinUsers($Result, array('InsertUserID'), array('Join' => array('Name', 'Photo', 'Email')));
-      return $Result;
-   }
-   
-   /**
-    * Add a new activity item.
-    *
-    * Getting reworked for 2.1 so I'm cheating and skipping params for now. -mlr
-    *
-    * @since 2.0.0
-    * @access public
-    * @param int $ActivityUserID
-    * @param string $ActivityType
-    * @param string $Story
-    * @param int $RegardingUserID
-    * @param int $CommentActivityID
-    * @param string $Route
-    * @param mixed $SendEmail
-    * @return int ActivityID of item created.
-    */
-   public function Add($ActivityUserID, $ActivityType, $Story = NULL, $RegardingUserID = NULL, $CommentActivityID = NULL, $Route = NULL, $SendEmail = '') {
-      static $ActivityTypes = array();
+    /** Activity status: The activity sent just fine. */
+    const SENT_OK = 2;
 
-      // Get the ActivityTypeID & see if this is a notification.
-      $ActivityTypeRow = self::GetActivityType($ActivityType);
-         
-      if ($ActivityTypeRow !== FALSE) {
-         $ActivityTypeID = $ActivityTypeRow['ActivityTypeID'];
-         $Notify = (bool)$ActivityTypeRow['Notify'];
-      } else {
-         trigger_error(ErrorMessage(sprintf('Activity type could not be found: %s', $ActivityType), 'ActivityModel', 'Add'), E_USER_ERROR);
-      }
-      
-      $Activity = array(
-          'ActivityUserID' => $ActivityUserID,
-          'ActivityType' => $ActivityType,
-          'Story' => $Story,
-          'RegardingUserID' => $RegardingUserID,
-          'Route' => $Route
-      );
-      
+    /** Activity status: The activity is waiting to be sent. */
+    const SENT_PENDING = 3;
 
-      // Massage $SendEmail to allow for only sending an email.
-      $QueueEmail = FALSE;
-      if ($SendEmail === 'Only') {
-         $SendEmail = '';
-         $AddActivity = FALSE;
-      } else if ($SendEmail === 'QueueOnly') {
-         $SendEmail = '';
-         $QueueEmail = TRUE;
-         $AddActivity = TRUE;
-         $Notify = TRUE;
-      } else {
-         $AddActivity = TRUE;
-      }
-      
-      // If $SendEmail was FALSE or TRUE, let it override the $Notify setting.
-      if ($SendEmail === FALSE || $SendEmail === TRUE)
-         $Notify = $SendEmail;
-      
-      $Preference = FALSE;
-      if (($ActivityTypeRow['Notify'] || !$ActivityTypeRow['Public']) && $RegardingUserID) {
-         $Activity['NotifyUserID'] = $Activity['RegardingUserID'];
-         $Preference = $ActivityType;
-      } else {
-         $Activity['NotifyUserID'] = self::NOTIFY_PUBLIC;
-      }
+    /** Activity status: The activity could not be sent. */
+    const SENT_FAIL = 4;
 
-      // Otherwise let the decision to email lie with the $Notify setting.
-      if ($SendEmail == 'Force' || $Notify) {
-         $Activity['Emailed'] = self::SENT_PENDING;
-      } elseif ($Notify) {
-         $Activity['Emailed'] = self::SENT_PENDING;
-      } elseif ($SendEmail === FALSE) {
-         $Activity['Emailed'] = self::SENT_ARCHIVE;
-      }
-      
-      $Activity = $this->Save($Activity, $Preference);
-      
-      return GetValue('ActivityID', $Activity);
-   }
-   
-   public static function JoinUsers(&$Activities) {
-      Gdn::UserModel()->JoinUsers($Activities, array('ActivityUserID', 'RegardingUserID'), array('Join' => array('Name', 'Email', 'Gender', 'Photo')));
-   }
-   
-   /**
-    * Get default notification preference for an activity type.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param string $ActivityType
-    * @param array $Preferences
-    * @param string $Type One of the following:
-    *  - Popup: Popup a notification.
-    *  - Email: Email the notification.
-    *  - NULL: True if either notification is true.
-    *  - both: Return an array of (Popup, Email).
-    * @return bool
-    */
-   public static function NotificationPreference($ActivityType, $Preferences, $Type = NULL) {
-      if (is_numeric($Preferences)) {
-         $User = Gdn::UserModel()->GetID($Preferences);
-         if (!$User)
-            return $Type == 'both' ? array(FALSE, FALSE) : FALSE;
-         $Preferences = GetValue('Preferences', $User);
-      }
-      
-      if ($Type === NULL) {
-         $Result = self::NotificationPreference($ActivityType, $Preferences, 'Email')
-                || self::NotificationPreference($ActivityType, $Preferences, 'Popup');
-         
-         return $Result;
-      } elseif ($Type === 'both') {
-         $Result = array(
-            self::NotificationPreference($ActivityType, $Preferences, 'Popup'),
-            self::NotificationPreference($ActivityType, $Preferences, 'Email')
-            );
-         return $Result;
-      }
-      
-      $ConfigPreference = C("Preferences.$Type.$ActivityType", '0');
-      if ((int)$ConfigPreference === 2)
-         $Preference = TRUE; // This preference is forced on.
-      if ($ConfigPreference !== FALSE)
-         $Preference = ArrayValue($Type.'.'.$ActivityType, $Preferences, $ConfigPreference);
-      else
-         $Preference = FALSE;
-      
-      return $Preference;
-   }
-   
-   /**
-    * Send notification.
-    *
-    * @since 2.0.17
-    * @access public
-    * @param int $ActivityID
-    * @param array $Story
-    * @param string $Force
-    */
-   public function SendNotification($ActivityID, $Story = '', $Force = FALSE) {
-      $Activity = $this->GetID($ActivityID);
-      if (!$Activity)
-         return;
-      
-      $Activity = (object)$Activity;
-      
-      $Story = Gdn_Format::Text($Story == '' ? $Activity->Story : $Story, FALSE);
-      // If this is a comment on another activity, fudge the activity a bit so that everything appears properly.
-      if (is_null($Activity->RegardingUserID) && $Activity->CommentActivityID > 0) {
-         $CommentActivity = $this->GetID($Activity->CommentActivityID);
-         $Activity->RegardingUserID = $CommentActivity->RegardingUserID;
-         $Activity->Route = '/activity/item/'.$Activity->CommentActivityID;
-      }
-      
-      $User = Gdn::UserModel()->GetID($Activity->RegardingUserID, DATASET_TYPE_OBJECT);
+    /** Activity status: There was an error sending the activity, but it can be retried. */
+    const SENT_ERROR = 5;
 
-      if ($User) {
-         if ($Force)
-            $Preference = $Force;
-         else {
-            $Preferences = $User->Preferences;
-            $Preference = ArrayValue('Email.'.$Activity->ActivityType, $Preferences, Gdn::Config('Preferences.Email.'.$Activity->ActivityType));
-         }
-         if ($Preference) {
-            $ActivityHeadline = Gdn_Format::Text(Gdn_Format::ActivityHeadline($Activity, $Activity->ActivityUserID, $Activity->RegardingUserID), FALSE);
-            $Email = new Gdn_Email();
-            $Email->Subject(sprintf(T('[%1$s] %2$s'), Gdn::Config('Garden.Title'), $ActivityHeadline));
-            $Email->To($User);
-            //$Email->From(Gdn::Config('Garden.SupportEmail'), Gdn::Config('Garden.SupportName'));
-            
-            $Message = sprintf(
-                  $Story == '' ? T('EmailNotification', "%1\$s\n\n%2\$s") : T('EmailStoryNotification', "%3\$s\n\n%2\$s"),
-                  $ActivityHeadline,
-                  ExternalUrl($Activity->Route == '' ? '/' : $Activity->Route),
-                  $Story
-               );
-            $Email->Message($Message);
-            
-            $Notification = array('ActivityID' => $ActivityID, 'User' => $User, 'Email' => $Email, 'Route' => $Activity->Route, 'Story' => $Story, 'Headline' => $ActivityHeadline, 'Activity' => $Activity);
-            $this->EventArguments = $Notification;
-            $this->FireEvent('BeforeSendNotification');
-            try {
-               // Only send if the user is not banned
-               if (!GetValue('Banned', $User))
-                  $Email->Send();
-               
-               $Emailed = self::SENT_OK;
-            } catch (phpmailerException $pex) {
-               if ($pex->getCode() == PHPMailer::STOP_CRITICAL)
-                  $Emailed = self::SENT_FAIL;
-               else
-                  $Emailed = self::SENT_ERROR;
-            } catch (Exception $ex) {
-               $Emailed = self::SENT_FAIL; // similar to http 5xx
-            }
-            try {
-               $this->SQL->Put('Activity', array('Emailed' => $Emailed), array('ActivityID' => $ActivityID));
-            } catch (Exception $Ex) {
-            }
-         }
-      }
-   }
-   
-   public function Email(&$Activity, $NoDelete = FALSE) {
-      if (is_numeric($Activity)) {
-         $ActivityID = $Activity;
-         $Activity = $this->GetID($ActivityID);
-      } else {
-         $ActivityID = GetValue('ActivityID', $Activity);
-      }
-      
-      if (!$Activity)
-         return FALSE;
-      
-      $Activity = (array)$Activity;
-      
-      $User = Gdn::UserModel()->GetID($Activity['NotifyUserID'], DATASET_TYPE_ARRAY);
-      if (!$User)
-         return FALSE;
-      
-      // Format the activity headline based on the user being emailed.
-      if (GetValue('HeadlineFormat', $Activity)) {
-         $SessionUserID = Gdn::Session()->UserID;
-         Gdn::Session()->UserID = $User['UserID'];
-         $Activity['Headline'] = FormatString($Activity['HeadlineFormat'], $Activity);
-         Gdn::Session()->UserID = $SessionUserID;
-      } else {
-         if (!isset($Activity['ActivityGender'])) {
-            $AT = self::GetActivityType($Activity['ActivityType']);
-            
-            $Data = array($Activity);
-            self::JoinUsers($Data);
-            $Activity = $Data[0];
-            $Activity['RouteCode'] = GetValue('RouteCode', $AT);
-            $Activity['FullHeadline'] = GetValue('FullHeadline', $AT);
-            $Activity['ProfileHeadline'] = GetValue('ProfileHeadline', $AT);
-         }
-         
-         $Activity['Headline'] = Gdn_Format::ActivityHeadline($Activity, '', $User['UserID']);
-      }
-      
-      // Build the email to send.
-      $Email = new Gdn_Email();
-      $Email->Subject(sprintf(T('[%1$s] %2$s'), C('Garden.Title'), Gdn_Format::PlainText($Activity['Headline'])));
-      $Email->To($User);
-      
-      $Url = ExternalUrl($Activity['Route'] == '' ? '/' : $Activity['Route']);
-      
-      if ($Activity['Story']) {
-         $Message = sprintf(T('EmailStoryNotification', "%3\$s\n\n%2\$s"), 
-               Gdn_Format::PlainText($Activity['Headline']),
-               $Url,
-               Gdn_Format::PlainText($Activity['Story'])
-            );
-      } else {
-         $Message = sprintf(T('EmailNotification', "%1\$s\n\n%2\$s"), Gdn_Format::PlainText($Activity['Headline']), $Url); 
-      }
-      $Email->Message($Message);
-      
-      // Fire an event for the notification.
-      $Notification = array('ActivityID' => $ActivityID, 'User' => $User, 'Email' => $Email, 'Route' => $Activity['Route'], 'Story' => $Activity['Story'], 'Headline' => $Activity['Headline'], 'Activity' => $Activity);
-      $this->EventArguments = $Notification;
-      $this->FireEvent('BeforeSendNotification');
-      
-      // Send the email.
-      try {
-         // Only send if the user is not banned
-         if (!GetValue('Banned', $User))
-            $Email->Send();
-         
-         $Emailed = self::SENT_OK;
-         
-         // Delete the activity now that it has been emailed.
-         if (!$NoDelete && !$Activity['Notified']) {
-            if (GetValue('ActivityID', $Activity)) {
-               $this->Delete($Activity['ActivityID']);
+    /** Activity status: The recipient was not eligible for an email notification. */
+    const SENT_SKIPPED = 6;
+
+    /** Activity status: Sending is in progress. */
+    const SENT_INPROGRESS = 31;
+
+    /** @var array|null Allowed activity types. */
+    public static $ActivityTypes = null;
+
+    /** @var array Activity to be saved. */
+    public static $Queue = [];
+
+    /** @var int Limit on number of activity to combine. */
+    public static $MaxMergeCount = 10;
+
+    /** @var ActivityEmail[] Emails pending sending. */
+    private static $emailQueue = [];
+
+    /** @var EventDispatcherInterface */
+    private $eventDispatcher;
+
+    /** @var Psr\Log\LoggerInterface */
+    private $logger;
+
+    /**
+     * @var string The amount of time to delete logs after.
+     */
+    private $pruneAfter;
+
+    /** @var FormatService */
+    private $formatService;
+
+    /** @var UserModel */
+    private $userModel;
+
+    /** @var CacheInterface */
+    private $cache;
+
+    /**
+     * Defines the related database table name.
+     *
+     * @param Gdn_Validation $validation The validation dependency.
+     * @param LoggerInterface $logger
+     * @param FormatService $formatService
+     * @param EventDispatcherInterface $eventDispatcher
+     */
+    public function __construct(
+        Gdn_Validation $validation = null,
+        ?LoggerInterface $logger = null,
+        ?FormatService $formatService = null,
+        ?EventDispatcherInterface $eventDispatcher = null
+    ) {
+        parent::__construct('Activity', $validation);
+
+        try {
+            $this->setPruneAfter(c('Garden.PruneActivityAfter', '2 months'));
+        } catch (Exception $ex) {
+            $this->setPruneAfter('2 months');
+        }
+
+        $this->formatService = $formatService instanceof FormatService ?
+            $formatService : Gdn::getContainer()->get(FormatService::class);
+        $this->logger = $logger instanceof LoggerInterface ?
+            $logger : Gdn::getContainer()->get(LoggerInterface::class);
+        $this->eventDispatcher = $eventDispatcher instanceof EventDispatcherInterface ?
+            $eventDispatcher : Gdn::getContainer()->get(EventDispatcherInterface::class);
+        $this->userModel = Gdn::getContainer()->get(UserModel::class);
+        $this->cache = \Gdn::getContainer()->get(CacheInterface::class);
+    }
+
+    /**
+     * Build basis of common activity SQL query.
+     *
+     * @param bool $join
+     * @since 2.0.0
+     * @access public
+     */
+    public function activityQuery($join = true) {
+        $this->SQL
+            ->select('a.*')
+            ->select('t.FullHeadline, t.ProfileHeadline, t.AllowComments, t.ShowIcon, t.RouteCode')
+            ->select('t.Name', '', 'ActivityType')
+            ->from('Activity a')
+            ->join('ActivityType t', 'a.ActivityTypeID = t.ActivityTypeID');
+
+        if ($join) {
+            $this->SQL
+                ->select('au.Name', '', 'ActivityName')
+                ->select('au.Gender', '', 'ActivityGender')
+                ->select('au.Photo', '', 'ActivityPhoto')
+                ->select('au.Email', '', 'ActivityEmail')
+                ->select('ru.Name', '', 'RegardingName')
+                ->select('ru.Gender', '', 'RegardingGender')
+                ->select('ru.Email', '', 'RegardingEmail')
+                ->select('ru.Photo', '', 'RegardingPhoto')
+                ->join('User au', 'a.ActivityUserID = au.UserID')
+                ->join('User ru', 'a.RegardingUserID = ru.UserID', 'left');
+        }
+
+        $this->fireEvent('AfterActivityQuery');
+    }
+
+    /**
+     * Can the current user view the activity?
+     *
+     * @param array $activity
+     * @return bool
+     */
+    public function canView(array $activity): bool {
+        $result = false;
+
+        $userid = val('NotifyUserID', $activity);
+        switch ($userid) {
+            case ActivityModel::NOTIFY_PUBLIC:
+                $result = true;
+                break;
+            case ActivityModel::NOTIFY_MODS:
+                if (checkPermission('Garden.Moderation.Manage')) {
+                    $result = true;
+                }
+                break;
+            case ActivityModel::NOTIFY_ADMINS:
+                if (checkPermission('Garden.Settings.Manage')) {
+                    $result = true;
+                }
+                break;
+            default:
+                // Actual userid.
+                if (Gdn::session()->UserID === $userid || checkPermission('Garden.Community.Manage')) {
+                    $result = true;
+                }
+                break;
+        }
+
+        return $result;
+    }
+
+    /**
+     *
+     *
+     * @param $data
+     */
+    public function calculateData(&$data) {
+        foreach ($data as &$row) {
+            $this->calculateRow($row);
+        }
+    }
+
+    /**
+     *
+     *
+     * @param $row
+     */
+    public function calculateRow(&$row) {
+        $activityType = self::getActivityType($row['ActivityTypeID']);
+        $row['ActivityType'] = val('Name', $activityType);
+        if (is_string($row['Data'])) {
+            $row['Data'] = dbdecode($row['Data']);
+        }
+
+        $row['PhotoUrl'] = url($row['Route'], true);
+        if (!$row['Photo']) {
+            if (isset($row['ActivityPhoto'])) {
+                $row['Photo'] = $row['ActivityPhoto'];
+                $row['PhotoUrl'] = userUrl($row, 'Activity');
             } else {
-               $Activity['_Delete'] = TRUE;
+                $user = $this->userModel->getID($row['ActivityUserID'], DATASET_TYPE_ARRAY);
+                if ($user) {
+                    $photo = $user['Photo'];
+                    $row['PhotoUrl'] = userUrl($user);
+                    if (!$photo || isUrl($photo)) {
+                        $row['Photo'] = $photo;
+                    } else {
+                        $row['Photo'] = Gdn_Upload::url(changeBasename($photo, 'n%s'));
+                    }
+                }
             }
-         }
-      } catch (phpmailerException $pex) {
-         if ($pex->getCode() == PHPMailer::STOP_CRITICAL)
-            $Emailed = self::SENT_FAIL;
-         else
-            $Emailed = self::SENT_ERROR;
-      } catch (Exception $ex) {
-         $Emailed = self::SENT_FAIL; // similar to http 5xx
-      }
-      $Activity['Emailed'] = $Emailed;
-      if ($ActivityID) {
-         // Save the emailed flag back to the activity.
-         $this->SQL->Put('Activity', array('Emailed' => $Emailed), array('ActivityID' => $ActivityID));
-      }
-   }
-   
-   /**
-    * @var array The Notification Queue is used to stack up notifications to users. Ensures
-    * that they only receive one notification about a single topic. For example:
-    * if someone comments on a discussion that they started and they have
-    * bookmarked, it will only notify them about one or the other, not both.
-    *
-    * This code makes the assumption that the queue is used for one user action
-    * at a time. For example: a comment being added to a discussion. The queue
-    * should be cleared before it is used, and sending the queue will clear it
-    * again.
-    */
-   private $_NotificationQueue = array();
-   
-   /**
-    * Clear notification queue.
-    *
-    * @since 2.0.17
-    * @access public
-    */
-   public function ClearNotificationQueue() {
-      unset($this->_NotificationQueue);
-      $this->_NotificationQueue = array();
-   }
-   
-   /**
-    * Save a comment on an activity.
-    * @param array $Comment
-    * @return int|bool 
-    * @since 2.1
-    */
-   public function Comment($Comment) {
-      $Comment['InsertUserID'] = Gdn::Session()->UserID;
-      $Comment['DateInserted'] = Gdn_Format::ToDateTime();
-      $Comment['InsertIPAddress'] = Gdn::Request()->IpAddress();
-      
-      $this->Validation->ApplyRule('ActivityID', 'Required');
-      $this->Validation->ApplyRule('Body', 'Required');
-      $this->Validation->ApplyRule('DateInserted', 'Required');
-      $this->Validation->ApplyRule('InsertUserID', 'Required');
-      
-      $this->EventArguments['Comment'] = $Comment;
-      $this->FireEvent('BeforeSaveComment');
-      
-      if ($this->Validate($Comment)) {
-         $Activity = $this->GetID($Comment['ActivityID'], DATASET_TYPE_ARRAY);
-         Gdn::Controller()->Json('Activity', $CommentActivityID);
-         
-         $_ActivityID = $Comment['ActivityID'];
-         // Check to see if this is a shared activity/notification.
-         if ($CommentActivityID = GetValue('CommentActivityID', $Activity['Data'])) {
-            Gdn::Controller()->Json('CommentActivityID', $CommentActivityID);
-            $Comment['ActivityID'] = $CommentActivityID;
-         }
-         
-         // Check for spam.
-         $Spam = SpamModel::IsSpam('ActivityComment', $Comment);
-         if ($Spam)
-            return SPAM;
-         
-         // Check for approval
-         $ApprovalRequired = CheckRestriction('Vanilla.Approval.Require');
-         if ($ApprovalRequired && !GetValue('Verified', Gdn::Session()->User)) {
-         	LogModel::Insert('Pending', 'ActivityComment', $Comment);
-         	return UNAPPROVED;
-         }
-         
-         $ID = $this->SQL->Insert('ActivityComment', $Comment);
-         
-         if ($ID) {
-            // Check to see if this comment bumps the activity.
-            if ($Activity && GetValue('Bump', $Activity['Data'])) {
-               $this->SQL->Put('Activity', array('DateUpdated' => $Comment['DateInserted']), array('ActivityID' => $Activity['ActivityID']));
-               if ($_ActivityID != $Comment['ActivityID']) {
-                  $this->SQL->Put('Activity', array('DateUpdated' => $Comment['DateInserted']), array('ActivityID' => $_ActivityID));
-               }
+        }
+
+        $data = $row['Data'];
+        if (isset($data['ActivityUserIDs'])) {
+            $row['ActivityUserID'] = array_merge([$row['ActivityUserID']], $data['ActivityUserIDs']);
+            $row['ActivityUserID_Count'] = val('ActivityUserID_Count', $data);
+        }
+
+        if (isset($data['RegardingUserIDs'])) {
+            $row['RegardingUserID'] = array_merge([$row['RegardingUserID']], $data['RegardingUserIDs']);
+            $row['RegardingUserID_Count'] = val('RegardingUserID_Count', $data);
+        }
+
+
+        if (!empty($row['Route'])) {
+            $row['Url'] = externalUrl($row['Route']);
+        } else {
+            $id = $row['ActivityID'];
+            $row['Url'] = Gdn::request()->url("/activity/item/$id", true);
+        }
+
+        if ($row['HeadlineFormat']) {
+            $row['Headline'] = formatString($row['HeadlineFormat'], $row);
+        } else {
+            $row['Headline'] = Gdn_Format::activityHeadline($row);
+        }
+    }
+
+    /**
+     * Define a new activity type.
+     * @param string $name The string code of the activity type.
+     * @param array $activity The data that goes in the ActivityType table.
+     * @since 2.1
+     */
+    public function defineType($name, $activity = []) {
+        $this->SQL->replace('ActivityType', $activity, ['Name' => $name], true);
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function delete($where = [], $options = []) {
+        if (is_numeric($where)) {
+            deprecated('ActivityModel->delete(int)', 'ActivityModel->deleteID(int)');
+
+            $result = $this->deleteID($where, $options);
+            return $result;
+        } elseif (count($where) === 1 && isset($where['ActivityID'])) {
+            return parent::delete($where, $options);
+        }
+
+        throw new \BadMethodCallException("ActivityModel->delete() is not supported.", 400);
+    }
+
+    /**
+     * Delete a particular activity item.
+     *
+     * @param int $activityID The unique ID of activity to be deleted.
+     * @param array $options Not used.
+     * @return bool Returns **true** if the activity was deleted or **false** otherwise.
+     */
+    public function deleteID($activityID, $options = []) {
+        // Get the activity first.
+        $activity = $this->getID($activityID);
+        if ($activity) {
+            // Log the deletion.
+            $log = val('Log', $options);
+            if ($log) {
+                LogModel::insert($log, 'Activity', $activity);
             }
-         }
-         
-         return $ID;
-      }
-      return FALSE;
-   }
-   
-   /**
-    * Send all notifications in the queue.
-    *
-    * @since 2.0.17
-    * @access public
-    */
-   public function SendNotificationQueue() {
-      foreach ($this->_NotificationQueue as $UserID => $Notifications) {
-         if (is_array($Notifications)) {
-            // Only send out one notification per user.
-            $Notification = $Notifications[0];
-            
-            $Email = $Notification['Email'];
-            
-            if (is_object($Email)) {
-               $this->EventArguments = $Notification;
-               $this->FireEvent('BeforeSendNotification');
 
-               try {
-                  // Only send if the user is not banned
-                  $User = Gdn::UserModel()->GetID($UserID);
-                  if (!GetValue('Banned', $User))
-                     $Email->Send();
-                  
-                  $Emailed = self::SENT_OK;
-               } catch (phpmailerException $pex) {
-                  if ($pex->getCode() == PHPMailer::STOP_CRITICAL)
-                     $Emailed = self::SENT_FAIL;
-                  else
-                     $Emailed = self::SENT_ERROR;
-               } catch(Exception $Ex) {
-                  $Emailed = self::SENT_FAIL;
-               }
-               
-               try {
-                  $this->SQL->Put('Activity', array('Emailed' => $Emailed), array('ActivityID' => $Notification['ActivityID']));
-               } catch (Exception $Ex) {
-               }
+            // Delete comments on the activity item
+            $this->SQL->delete('ActivityComment', ['ActivityID' => $activityID]);
+
+            // Delete the activity item
+            return parent::deleteID($activityID);
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Delete an activity comment.
+     *
+     * @since 2.1
+     *
+     * @param int $iD
+     * @return Gdn_DataSet
+     */
+    public function deleteComment($iD) {
+        return $this->SQL->delete('ActivityComment', ['ActivityCommentID' => $iD]);
+    }
+
+    /**
+     * Get the recent activities.
+     *
+     * @param array $where
+     * @param int $limit
+     * @param int $offset
+     * @return Gdn_DataSet
+     */
+    public function getWhereRecent($where, $limit = 0, $offset = 0) {
+        $result = $this->getWhere($where, '', '', $limit, $offset);
+        return $result;
+    }
+
+    /**
+     * Modifies standard Gdn_Model->GetWhere to use AcitivityQuery.
+     *
+     * Events: AfterGet.
+     *
+     * @param array $where A filter suitable for passing to Gdn_SQLDriver::where().
+     * @param string $orderFields A comma delimited string to order the data.
+     * @param string $orderDirection One of **asc** or **desc**.
+     * @param int|bool $limit The database limit.
+     * @param int|bool $offset The database offset.
+     * @return Gdn_DataSet SQL results.
+     */
+    public function getWhere($where = [], $orderFields = '', $orderDirection = '', $limit = false, $offset = false) {
+        if (is_string($where)) {
+            deprecated('ActivityModel->getWhere($key, $value)', 'ActivityModel->getWhere([$key => $value])');
+            $where = [$where => $orderFields];
+            $orderFields = '';
+        }
+        if (is_numeric($orderFields)) {
+            deprecated('ActivityModel->getWhere($where, $limit)');
+            $limit = $orderFields;
+            $orderFields = '';
+        }
+        if (is_numeric($orderDirection)) {
+            deprecated('ActivityModel->getWhere($where, $limit, $offset)');
+            $offset = $orderDirection;
+            $orderDirection = '';
+        }
+        $limit = $limit ?: 30;
+        $offset = $offset ?: 0;
+
+        $orderFields = $orderFields ?: 'a.DateUpdated';
+        $orderDirection = $orderDirection ?: 'desc';
+
+        // Add the basic activity query.
+        $this->SQL
+            ->select('a2.*')
+            ->select('t.FullHeadline, t.ProfileHeadline, t.AllowComments, t.ShowIcon, t.RouteCode')
+            ->select('t.Name', '', 'ActivityType')
+            ->from('Activity a')
+            ->join('Activity a2', 'a.ActivityID = a2.ActivityID')// self-join for index speed.
+            ->join('ActivityType t', 'a2.ActivityTypeID = t.ActivityTypeID');
+
+        // Add prefixes to the where.
+        foreach ($where as $key => $value) {
+            if (strpos($key, '.') === false) {
+                $where['a.'.$key] = $value;
+                unset($where[$key]);
             }
-         }
-      }
+        }
 
-      // Clear out the queue
-      unset($this->_NotificationQueue);
-      $this->_NotificationQueue = array();
-   }
-   
-   public function SetNotified($ActivityIDs) {
-      if (!is_array($ActivityIDs) || count($ActivityIDs) == 0)
-         return;
-      
-      $this->SQL->Update('Activity')
-         ->Set('Notified', self::SENT_OK)
-         ->WhereIn('ActivityID', $ActivityIDs)
-         ->Put();
-   }
-   
-   public function Share(&$Activity) {
-      // Massage the event for the user.
-      $this->EventArguments['RecordType'] = 'Activity';
-      $this->EventArguments['Activity'] =& $Activity;
-      
-      $this->FireEvent('Share');
-   }
-   
-   /**
-    * Queue a notification for sending.
-    *
-    * @since 2.0.17
-    * @access public
-    * @param int $ActivityID
-    * @param string $Story
-    * @param string $Position
-    * @param bool $Force
-    */
-   public function QueueNotification($ActivityID, $Story = '', $Position = 'last', $Force = FALSE) {
-      $Activity = $this->GetID($ActivityID);
-      if (!is_object($Activity))
-         return;
-      
-      $Story = Gdn_Format::Text($Story == '' ? $Activity->Story : $Story, FALSE);
-      // If this is a comment on another activity, fudge the activity a bit so that everything appears properly.
-      if (is_null($Activity->RegardingUserID) && $Activity->CommentActivityID > 0) {
-         $CommentActivity = $this->GetID($Activity->CommentActivityID);
-         $Activity->RegardingUserID = $CommentActivity->RegardingUserID;
-         $Activity->Route = '/activity/item/'.$Activity->CommentActivityID;
-      }
-      $User = Gdn::UserModel()->GetID($Activity->RegardingUserID, DATASET_TYPE_OBJECT); //$this->SQL->Select('UserID, Name, Email, Preferences')->From('User')->Where('UserID', $Activity->RegardingUserID)->Get()->FirstRow();
-      
-      if ($User) {
-         if ($Force)
-            $Preference = $Force;
-         else {
-//            $Preferences = Gdn_Format::Unserialize($User->Preferences);
-            $ConfigPreference = C('Preferences.Email.'.$Activity->ActivityType, '0');
-            if ($ConfigPreference !== FALSE)
-               $Preference = GetValue('Email.'.$Activity->ActivityType, $User->Preferences, $ConfigPreference);
-            else
-               $Preference = FALSE;
-         }
-         
-         if ($Preference) {
-            $ActivityHeadline = Gdn_Format::Text(Gdn_Format::ActivityHeadline($Activity, $Activity->ActivityUserID, $Activity->RegardingUserID), FALSE);
-            $Email = new Gdn_Email();
-            $Email->Subject(sprintf(T('[%1$s] %2$s'), Gdn::Config('Garden.Title'), $ActivityHeadline));
-            $Email->To($User);
-            $Message = sprintf(
-                  $Story == '' ? T('EmailNotification', "%1\$s\n\n%2\$s") : T('EmailStoryNotification', "%3\$s\n\n%2\$s"),
-                  $ActivityHeadline,
-                  ExternalUrl($Activity->Route == '' ? '/' : $Activity->Route),
-                  $Story
-               );
-            $Email->Message($Message);
-            if (!array_key_exists($User->UserID, $this->_NotificationQueue))
-               $this->_NotificationQueue[$User->UserID] = array();
+        $result = $this->SQL
+            ->where($where)
+            ->orderBy($orderFields, $orderDirection)
+            ->limit($limit, $offset)
+            ->get();
 
-            $Notification = array('ActivityID' => $ActivityID, 'User' => $User, 'Email' => $Email, 'Route' => $Activity->Route, 'Story' => $Story, 'Headline' => $ActivityHeadline, 'Activity' => $Activity);
-            if ($Position == 'first')
-               $this->_NotificationQueue[$User->UserID] = array_merge(array($Notification), $this->_NotificationQueue[$User->UserID]);
-            else
-               $this->_NotificationQueue[$User->UserID][] = $Notification;
-         }
-      }
-   }
-   
-   /**
-    * Queue an activity for saving later.
-    * @param array $Data The data in the activity.
-    * @param string|FALSE $Preference The name of the preference governing the activity.
-    * @param array $Options Additional options for saving.
-    * @return type 
-    */
-   public function Queue($Data, $Preference = FALSE, $Options = array()) {
-      $this->_Touch($Data);
-      if (!isset($Data['NotifyUserID']) || !isset($Data['ActivityType']))
-         throw new Exception('Data missing NotifyUserID and/or ActivityType', 400);
-      
-      if ($Data['ActivityUserID'] == $Data['NotifyUserID'] && !GetValue('Force', $Options))
-         return; // don't notify users of something they did.
-      
-      $Notified = $Data['Notified'];
-      $Emailed = $Data['Emailed'];
-      
-      if (isset(self::$Queue[$Data['NotifyUserID']][$Data['ActivityType']])) {
-         list($CurrentData, $CurrentOptions) = self::$Queue[$Data['NotifyUserID']][$Data['ActivityType']];
-         
-         $Notified = $Notified ? $Notified : $CurrentData['Notified'];
-         $Emailed = $Emailed ? $Emailed : $CurrentData['Emailed'];
-         $Data = array_merge($CurrentData, $Data);
-         $Options = array_merge($CurrentOptions, $Options);
-      }
-      
-      if ($Preference) {
-         list($Popup, $Email) = self::NotificationPreference($Preference, $Data['NotifyUserID'], 'both');
-         if (!$Popup && !$Email)
-            return; // don't queue if user doesn't want to be notified at all.
-         
-         if ($Popup)
-            $Notified = self::SENT_PENDING;
-         if ($Email)
-            $Emailed = self::SENT_PENDING;
-      }
-      $Data['Notified'] = $Notified;
-      $Data['Emailed'] = $Emailed;
-      
-      self::$Queue[$Data['NotifyUserID']][$Data['ActivityType']] = array($Data, $Options);
-   }
-   
-   public function Save($Data, $Preference = FALSE, $Options = array()) {
-      Trace('ActivityModel->Save()');
-      $Activity = $Data;
-      $this->_Touch($Activity);
-      
-      if ($Activity['ActivityUserID'] == $Activity['NotifyUserID'] && !GetValue('Force', $Options)) {
-         Trace('Skipping activity because it would notify the user of something they did.');
-         
-         return; // don't notify users of something they did.
-      }
-      
-      // Check the user's preference.
-      if ($Preference) {
-         list($Popup, $Email) = self::NotificationPreference($Preference, $Activity['NotifyUserID'], 'both');
-         
-         if ($Popup && !$Activity['Notified'])
-            $Activity['Notified'] = self::SENT_PENDING;
-         if ($Email && !$Activity['Emailed'])
-            $Activity['Emailed'] = self::SENT_PENDING;
-         
-         if (!$Activity['Notified'] && !$Activity['Emailed'] && !GetValue('Force', $Options)) {
-            Trace("Skipping activity because the user has no preference set.");
+        self::getUsers($result->resultArray());
+        $this->userModel->joinUsers(
+            $result->resultArray(),
+            ['ActivityUserID', 'RegardingUserID'],
+            ['Join' => ['Name', 'Email', 'Gender', 'Photo']]
+        );
+        $this->calculateData($result->resultArray());
+
+        $this->EventArguments['Data'] =& $result;
+        $this->fireEvent('AfterGet');
+
+        return $result;
+    }
+
+    /**
+     *
+     *
+     * @param array &$activities
+     * @since 2.1
+     */
+    public function joinComments(&$activities) {
+        // Grab all of the activity IDs.
+        $activityIDs = [];
+        foreach ($activities as $activity) {
+            if ($iD = val('CommentActivityID', $activity['Data'])) {
+                // This activity shares its comments with another activity.
+                $activityIDs[] = $iD;
+            } else {
+                $activityIDs[] = $activity['ActivityID'];
+            }
+        }
+        $activityIDs = array_unique($activityIDs);
+
+        $comments = $this->getComments($activityIDs);
+        $comments = Gdn_DataSet::index($comments, ['ActivityID'], ['Unique' => false]);
+        foreach ($activities as &$activity) {
+            $iD = val('CommentActivityID', $activity['Data']);
+            if (!$iD) {
+                $iD = $activity['ActivityID'];
+            }
+
+            if (isset($comments[$iD])) {
+                $activity['Comments'] = $comments[$iD];
+            } else {
+                $activity['Comments'] = [];
+            }
+        }
+    }
+
+    /**
+     * Modifies standard Gdn_Model->Get to use AcitivityQuery.
+     *
+     * Events: BeforeGet, AfterGet.
+     *
+     * @param int|bool $notifyUserID Unique ID of user to gather activity for or one of the NOTIFY_* constants in this class.
+     * @param int $offset Number to skip.
+     * @param int $limit How many to return.
+     * @return Gdn_DataSet SQL results.
+     */
+    public function getByUser($notifyUserID = false, $offset = 0, $limit = 30) {
+        $offset = is_numeric($offset) ? $offset : 0;
+        if ($offset < 0) {
+            $offset = 0;
+        }
+
+        $limit = is_numeric($limit) ? $limit : 0;
+        if ($limit < 0) {
+            $limit = 30;
+        }
+
+        $this->activityQuery(false);
+
+        if ($notifyUserID === false || $notifyUserID === 0) {
+            $notifyUserID = self::NOTIFY_PUBLIC;
+        }
+        $this->SQL->whereIn('NotifyUserID', (array)$notifyUserID);
+
+        $this->fireEvent('BeforeGet');
+        $result = $this->SQL
+            ->orderBy('a.ActivityID', 'desc')
+            ->limit($limit, $offset)
+            ->get();
+
+        $this->userModel->joinUsers($result, ['ActivityUserID', 'RegardingUserID'], ['Join' => ['Name', 'Photo', 'Email', 'Gender']]);
+
+        $this->EventArguments['Data'] =& $result;
+        $this->fireEvent('AfterGet');
+
+        return $result;
+    }
+
+    /**
+     *
+     *
+     * @param array &$data
+     */
+    public static function getUsers(&$data) {
+        $userIDs = [];
+
+        foreach ($data as &$row) {
+            if (is_string($row['Data'])) {
+                $row['Data'] = dbdecode($row['Data']);
+            }
+
+            $userIDs[$row['ActivityUserID']] = 1;
+            $userIDs[$row['RegardingUserID']] = 1;
+
+            if (isset($row['Data']['ActivityUserIDs'])) {
+                foreach ($row['Data']['ActivityUserIDs'] as $userID) {
+                    $userIDs[$userID] = 1;
+                }
+            }
+
+            if (isset($row['Data']['RegardingUserIDs'])) {
+                foreach ($row['Data']['RegardingUserIDs'] as $userID) {
+                    $userIDs[$userID] = 1;
+                }
+            }
+        }
+
+        Gdn::userModel()->getIDs(array_keys($userIDs));
+    }
+
+    /**
+     *
+     *
+     * @param $activityType
+     * @return bool
+     */
+    public static function getActivityType($activityType) {
+        if (self::$ActivityTypes === null) {
+            $data = Gdn::sql()->get('ActivityType')->resultArray();
+            foreach ($data as $row) {
+                self::$ActivityTypes[$row['Name']] = $row;
+                self::$ActivityTypes[$row['ActivityTypeID']] = $row;
+            }
+        }
+        if (isset(self::$ActivityTypes[$activityType])) {
+            return self::$ActivityTypes[$activityType];
+        }
+        return false;
+    }
+
+    /**
+     * Get number of activity related to a user.
+     *
+     * Events: BeforeGetCount.
+     *
+     * @since 2.0.0
+     * @access public
+     * @param string $userID Unique ID of user.
+     * @return int Number of activity items found.
+     */
+    public function getCount($userID = '') {
+        $this->SQL
+            ->select('a.ActivityID', 'count', 'ActivityCount')
+            ->from('Activity a')
+            ->join('ActivityType t', 'a.ActivityTypeID = t.ActivityTypeID');
+
+        if ($userID != '') {
+            $this->SQL
+                ->beginWhereGroup()
+                ->where('a.ActivityUserID', $userID)
+                ->orWhere('a.RegardingUserID', $userID)
+                ->endWhereGroup();
+        }
+
+        $session = Gdn::session();
+        if (!$session->isValid() || $session->UserID != $userID) {
+            $this->SQL->where('t.Public', '1');
+        }
+
+        $this->fireEvent('BeforeGetCount');
+        return $this->SQL
+            ->get()
+            ->firstRow()
+            ->ActivityCount;
+    }
+
+    /**
+     * Get activity related to a particular role.
+     *
+     * Events: AfterGet.
+     *
+     * @param string $roleID Unique ID of role.
+     * @param int $offset Number to skip.
+     * @param int $limit Max number to return.
+     * @return Gdn_DataSet SQL results.
+     * @since 2.0.18
+     */
+    public function getForRole($roleID = '', $offset = 0, $limit = 50) {
+        if (!is_array($roleID)) {
+            $roleID = [$roleID];
+        }
+
+        $offset = is_numeric($offset) ? $offset : 0;
+        if ($offset < 0) {
+            $offset = 0;
+        }
+
+        $limit = is_numeric($limit) ? $limit : 0;
+        if ($limit < 0) {
+            $limit = 0;
+        }
+
+        $this->activityQuery();
+        $result = $this->SQL
+            ->join('UserRole ur', 'a.ActivityUserID = ur.UserID')
+            ->whereIn('ur.RoleID', $roleID)
+            ->where('t.Public', '1')
+            ->orderBy('a.DateInserted', 'desc')
+            ->limit($limit, $offset)
+            ->get();
+
+        $this->EventArguments['Data'] =& $result;
+        $this->fireEvent('AfterGet');
+
+        return $result;
+    }
+
+    /**
+     * Get number of activity related to a particular role.
+     *
+     * @since 2.0.18
+     * @access public
+     * @param int|string $roleID Unique ID of role.
+     * @return int Number of activity items.
+     */
+    public function getCountForRole($roleID = '') {
+        if (!is_array($roleID)) {
+            $roleID = [$roleID];
+        }
+
+        return $this->SQL
+            ->select('a.ActivityID', 'count', 'ActivityCount')
+            ->from('Activity a')
+            ->join('ActivityType t', 'a.ActivityTypeID = t.ActivityTypeID')
+            ->join('UserRole ur', 'a.ActivityUserID = ur.UserID')
+            ->whereIn('ur.RoleID', $roleID)
+            ->where('t.Public', '1')
+            ->get()
+            ->firstRow()
+            ->ActivityCount;
+    }
+
+    /**
+     * Get a particular activity record.
+     *
+     * @param int $activityID Unique ID of activity item.
+     * @param bool|string $datasetType The format of the resulting data.
+     * @param array $options Not used.
+     * @return array|object A single SQL result.
+     */
+    public function getID($activityID, $datasetType = false, $options = []) {
+        $activity = parent::getID($activityID, $datasetType);
+        if ($activity) {
+            $this->calculateRow($activity);
+            $activities = [$activity];
+            self::joinUsers($activities);
+            $activity = array_pop($activities);
+        }
+
+        return $activity;
+    }
+
+    /**
+     * Get notifications for a user.
+     *
+     * Events: BeforeGetNotifications.
+     *
+     * @param int $notifyUserID Unique ID of user.
+     * @param int $offset Number to skip.
+     * @param int $limit Max number to return.
+     * @return Gdn_DataSet SQL results.
+     * @since 2.0.0
+     */
+    public function getNotifications($notifyUserID, $offset = 0, $limit = 30) {
+        $this->activityQuery(false);
+        $this->fireEvent('BeforeGetNotifications');
+        $result = $this->SQL
+            ->where('NotifyUserID', $notifyUserID)
+            ->limit($limit, $offset)
+            ->orderBy('a.ActivityID', 'desc')
+            ->get();
+        $result->datasetType(DATASET_TYPE_ARRAY);
+
+        self::getUsers($result->resultArray());
+        $this->userModel->joinUsers(
+            $result->resultArray(),
+            ['ActivityUserID', 'RegardingUserID'],
+            ['Join' => ['Name', 'Photo', 'Email', 'Gender']]
+        );
+        $this->calculateData($result->resultArray());
+
+        return $result;
+    }
+
+
+    /**
+     * @param $activity
+     * @return bool
+     */
+    public static function canDelete($activity) {
+        $session = Gdn::session();
+
+        $profileUserId = val('ActivityUserID', $activity);
+        $notifyUserId = val('NotifyUserID', $activity);
+
+        // User can delete any activity
+        if ($session->checkPermission('Garden.Activity.Delete')) {
+            return true;
+        }
+
+        $notifyUserIds = [ActivityModel::NOTIFY_PUBLIC];
+        if (Gdn::session()->checkPermission('Garden.Moderation.Manage')) {
+            $notifyUserIds[] = ActivityModel::NOTIFY_MODS;
+        }
+
+        // Is this a wall post?
+        if (!in_array(val('ActivityType', $activity), ['Status', 'WallPost']) || !in_array($notifyUserId, $notifyUserIds)) {
+            return false;
+        }
+        // Is this on the user's wall?
+        if ($profileUserId && $session->UserID == $profileUserId && $session->checkPermission('Garden.Profiles.Edit')) {
+            return true;
+        }
+
+        // The user inserted the activity --- may be added in later
+//      $insertUserId = val('InsertUserID', $activity);
+//      if ($insertUserId && $insertUserId == $session->UserID) {
+//         return true;
+//      }
+
+        return false;
+    }
+
+    /**
+     * Get notifications for a user since designated ActivityID.
+     *
+     * Events: BeforeGetNotificationsSince.
+     *
+     * @param int $userID Unique ID of user.
+     * @param int $lastActivityID ID of activity to start at.
+     * @param array|string $filterToActivityTypeIDs Limits returned activity to particular types.
+     * @param int $limit Max number to return.
+     * @return Gdn_DataSet SQL results.
+     * @since 2.0.18
+     */
+    public function getNotificationsSince($userID, $lastActivityID, $filterToActivityTypeIDs = '', $limit = 5) {
+        $this->activityQuery();
+        $this->fireEvent('BeforeGetNotificationsSince');
+        if (is_array($filterToActivityTypeIDs)) {
+            $this->SQL->whereIn('a.ActivityTypeID', $filterToActivityTypeIDs);
+        } else {
+            $this->SQL->where('t.Notify', '1');
+        }
+
+        $result = $this->SQL
+            ->where('RegardingUserID', $userID)
+            ->where('a.ActivityID >', $lastActivityID)
+            ->limit($limit, 0)
+            ->orderBy('a.ActivityID', 'desc')
+            ->get();
+
+        return $result;
+    }
+
+    /**
+     * @param int $iD
+     * @return array|false
+     */
+    public function getComment($iD) {
+        $activity = $this->SQL->getWhere('ActivityComment', ['ActivityCommentID' => $iD])->resultArray();
+        if ($activity) {
+            $this->userModel->joinUsers($activity, ['InsertUserID'], ['Join' => ['Name', 'Photo', 'Email']]);
+            return array_shift($activity);
+        }
+        return false;
+    }
+
+    /**
+     * Get comments related to designated activity items.
+     *
+     * Events: BeforeGetComments.
+     *
+     * @param array $activityIDs IDs of activity items.
+     * @return Gdn_DataSet SQL results.
+     */
+    public function getComments($activityIDs) {
+        $result = $this->SQL
+            ->select('c.*')
+            ->from('ActivityComment c')
+            ->whereIn('c.ActivityID', $activityIDs)
+            ->orderBy('c.ActivityID, c.DateInserted')
+            ->get()->resultArray();
+        $this->userModel->joinUsers($result, ['InsertUserID'], ['Join' => ['Name', 'Photo', 'Email']]);
+        return $result;
+    }
+
+    /**
+     * Add a new activity item.
+     *
+     * Getting reworked for 2.1 so I'm cheating and skipping params for now. -mlr
+     *
+     * @param int $activityUserID
+     * @param string $activityType
+     * @param string $story
+     * @param int|null $regardingUserID
+     * @param int $commentActivityID
+     * @param string $route
+     * @param string|bool $sendEmail
+     * @return int ActivityID of item created.
+     */
+    public function add($activityUserID, $activityType, $story = null, $regardingUserID = null, $commentActivityID = null, $route = null, $sendEmail = '') {
+        // Get the ActivityTypeID & see if this is a notification.
+        $activityTypeRow = self::getActivityType($activityType);
+        $notify = val('Notify', $activityTypeRow, false);
+
+        if ($activityTypeRow === false) {
+            trigger_error(
+                errorMessage(sprintf('Activity type could not be found: %s', $activityType), 'ActivityModel', 'Add'),
+                E_USER_ERROR
+            );
+        }
+
+        $activity = [
+            'ActivityUserID' => $activityUserID,
+            'ActivityType' => $activityType,
+            'Story' => $story,
+            'RegardingUserID' => $regardingUserID,
+            'Route' => $route
+        ];
+
+
+        // Massage $SendEmail to allow for only sending an email.
+        if ($sendEmail === 'Only') {
+            $sendEmail = '';
+        } elseif ($sendEmail === 'QueueOnly') {
+            $sendEmail = '';
+            $notify = true;
+        }
+
+        // If $SendEmail was FALSE or TRUE, let it override the $Notify setting.
+        if ($sendEmail === false || $sendEmail === true) {
+            $notify = $sendEmail;
+        }
+
+        $preference = false;
+        if (($activityTypeRow['Notify'] || !$activityTypeRow['Public']) && !empty($regardingUserID)) {
+            $activity['NotifyUserID'] = $activity['RegardingUserID'];
+            $preference = $activityType;
+        } else {
+            $activity['NotifyUserID'] = self::NOTIFY_PUBLIC;
+        }
+
+        // Otherwise let the decision to email lie with the $Notify setting.
+        if ($sendEmail === 'Force' || $notify) {
+            $activity['Emailed'] = self::SENT_PENDING;
+        } elseif ($notify) {
+            $activity['Emailed'] = self::SENT_PENDING;
+        } elseif ($sendEmail === false) {
+            $activity['Emailed'] = self::SENT_ARCHIVE;
+        }
+
+        $activity = $this->save($activity, $preference);
+
+        return val('ActivityID', $activity);
+    }
+
+    /**
+     * Join the users to the activities.
+     *
+     * @param array|Gdn_DataSet &$activities The activities to join.
+     */
+    public static function joinUsers(&$activities) {
+        Gdn::userModel()->joinUsers(
+            $activities,
+            ['ActivityUserID', 'RegardingUserID'],
+            ['Join' => ['Name', 'Email', 'Gender', 'Photo']]
+        );
+    }
+
+    /**
+     * Get default notification preference for an activity type.
+     *
+     * @since 2.0.0
+     * @access public
+     * @param string $activityType
+     * @param array $preferences
+     * @param string $type One of the following:
+     *  - Popup: Popup a notification.
+     *  - Email: Email the notification.
+     *  - NULL: True if either notification is true.
+     *  - both: Return an array of (Popup, Email).
+     * @return bool|bool[]
+     */
+    public static function notificationPreference($activityType, $preferences, $type = null) {
+        if (is_numeric($preferences)) {
+            $user = Gdn::userModel()->getID($preferences);
+            if (!$user) {
+                return $type == 'both' ? [false, false] : false;
+            }
+            $preferences = val('Preferences', $user);
+        }
+
+        if ($type === null) {
+            $result = self::notificationPreference($activityType, $preferences, 'Email')
+                || self::notificationPreference($activityType, $preferences, 'Popup');
+
+            return $result;
+        } elseif ($type === 'both') {
+            $result = [
+                self::notificationPreference($activityType, $preferences, 'Popup'),
+                self::notificationPreference($activityType, $preferences, 'Email')
+            ];
+            return $result;
+        }
+
+        $configPreference = c("Preferences.$type.$activityType", '0');
+        if ((int)$configPreference === 2) {
+            $preference = true; // This preference is forced on.
+        } elseif ($configPreference !== false) {
+            $preference = val($type.'.'.$activityType, $preferences, $configPreference);
+        } else {
+            $preference = false;
+        }
+
+        return $preference;
+    }
+
+    /**
+     * Send notification.
+     *
+     * @since 2.0.17
+     * @access public
+     * @param int $ActivityID
+     * @param array|string $Story
+     * @param bool $Force
+     */
+    public function sendNotification($ActivityID, $Story = '', $Force = false) {
+        $Activity = $this->getID($ActivityID);
+        if (!$Activity) {
             return;
-         }
-      }
-      
-      $ActivityType = self::GetActivityType($Activity['ActivityType']);
-      $ActivityTypeID = ArrayValue('ActivityTypeID', $ActivityType);
-      if (!$ActivityTypeID) {
-         Trace("There is no $ActivityType activity type.", TRACE_WARNING);
-         $ActivityType = self::GetActivityType('Default');
-         $ActivityTypeID = ArrayValue('ActivityTypeID', $ActivityType);
-      }
-      
-      $Activity['ActivityTypeID'] = $ActivityTypeID;
-      
-      $NotificationInc = 0;
-      if ($Activity['NotifyUserID'] > 0 && $Activity['Notified'])
-         $NotificationInc = 1;
-      
-      // Check to see if we are sharing this activity with another one.
-      if ($CommentActivityID = GetValue('CommentActivityID', $Activity['Data'])) {
-         $CommentActivity = $this->GetID($CommentActivityID);
-         $Activity['Data']['CommentNotifyUserID'] = $CommentActivity['NotifyUserID'];
-      }
-      
-      // Make sure this activity isn't a duplicate.
-      if (GetValue('CheckRecord', $Options)) {
-         // Check to see if this record already notified so we don't notify multiple times.
-         $Where = ArrayTranslate($Activity, array('NotifyUserID', 'RecordType', 'RecordID'));
-         $Where['DateUpdated >'] = Gdn_Format::ToDateTime(strtotime('-2 days')); // index hint
-         
-         $CheckActivity = $this->SQL->GetWhere(
+        }
+
+        $Activity = (object)$Activity;
+
+        $Story = Gdn_Format::text($Story == '' ? $Activity->Story : $Story, false);
+        // If this is a comment on another activity, fudge the activity a bit so that everything appears properly.
+        if (is_null($Activity->RegardingUserID) && $Activity->CommentActivityID > 0) {
+            $CommentActivity = $this->getID($Activity->CommentActivityID);
+            $Activity->RegardingUserID = $CommentActivity->RegardingUserID;
+            $Activity->Route = '/activity/item/'.$Activity->CommentActivityID;
+        }
+
+        $User = $this->userModel->getID($Activity->RegardingUserID, DATASET_TYPE_OBJECT);
+
+        if ($User) {
+            if ($Force) {
+                $Preference = $Force;
+            } else {
+                $Preferences = $User->Preferences;
+                $Preference = val('Email.'.$Activity->ActivityType, $Preferences, Gdn::config('Preferences.Email.'.$Activity->ActivityType));
+            }
+            if ($Preference) {
+                $ActivityHeadline = Gdn_Format::text(Gdn_Format::activityHeadline($Activity, $Activity->ActivityUserID, $Activity->RegardingUserID), false);
+                $Email = new Gdn_Email();
+                $Email->subject(sprintf(t('[%1$s] %2$s'), Gdn::config('Garden.Title'), $ActivityHeadline));
+                $Email->to($User);
+
+                $url = externalUrl(val('Route', $Activity) == '' ? '/' : val('Route', $Activity));
+                $emailTemplate = $Email->getEmailTemplate()
+                    ->setButton($url, val('ActionText', $Activity, t('Check it out')))
+                    ->setTitle($ActivityHeadline);
+
+                if ($message = $this->getEmailMessage($Activity)) {
+                    $emailTemplate->setMessage($message, true);
+                }
+
+                $Email->setEmailTemplate($emailTemplate);
+
+                $Notification = ['ActivityID' => $ActivityID, 'User' => $User, 'Email' => $Email, 'Route' => $Activity->Route, 'Story' => $Story, 'Headline' => $ActivityHeadline, 'Activity' => $Activity];
+                $this->EventArguments = $Notification;
+                $this->fireEvent('BeforeSendNotification');
+                try {
+                    // Only send if the user is not banned
+                    if (!val('Banned', $User)) {
+                        $Email->send();
+                        $Emailed = self::SENT_OK;
+                    } else {
+                        $Emailed = self::SENT_SKIPPED;
+                    }
+                } catch (\PHPMailer\PHPMailer\Exception $pex) {
+                    if ($pex->getCode() == PHPMailer::STOP_CRITICAL && !$Email->PhpMailer->isServerError($pex)) {
+                        $Emailed = self::SENT_FAIL;
+                    } else {
+                        $Emailed = self::SENT_ERROR;
+                    }
+                } catch (Exception $ex) {
+                    switch ($ex->getCode()) {
+                        case Gdn_Email::ERR_SKIPPED:
+                            $Emailed = self::SENT_SKIPPED;
+                            break;
+                        default:
+                            $Emailed = self::SENT_FAIL; // similar to http 5xx
+                    }
+                }
+                try {
+                    $this->SQL->put('Activity', ['Emailed' => $Emailed], ['ActivityID' => $ActivityID]);
+                } catch (Exception $Ex) {
+                    // We don't want a noisy error in a behind-the-scenes notification.
+                }
+            }
+        }
+    }
+
+
+    /**
+     * Takes an array representing an activity and builds the email message based on the activity's story and
+     * the contents of the global config Garden.Email.Prefix.
+     *
+     * @param array|object $activity The activity to build the email for.
+     * @return string The email message.
+     */
+    private function getEmailMessage($activity) {
+        $message = '';
+
+        if ($prefix = c('Garden.Email.Prefix', '')) {
+            $message = $prefix;
+        }
+
+        $isArray = is_array($activity);
+
+        $story = $isArray ? $activity['Story'] ?? null : $activity->Story ?? null;
+        $format = $isArray ? $activity['Format'] ?? null : $activity->Format ?? null;
+
+        if ($story && $format) {
+            $message .= Gdn::formatService()->renderHTML((string)$story, $format);
+        }
+
+        return $message;
+    }
+
+    /**
+     *
+     *
+     * @param $activity
+     * @param array $options Options to modify the behavior of the emailing.
+     *
+     * - **NoDelete**: Don't delete an email-only activity once the email is sent.
+     * - **EmailSubject**: A custom subject for the email.
+     * @return bool
+     * @throws Exception
+     */
+    public function email(&$activity, $options = []) {
+        // The $options parameter used to be $noDelete bool, this is the backwards compat.
+        if (is_bool($options)) {
+            $options = ['NoDelete' => $options];
+        }
+        $options += [
+            'NoDelete' => false,
+            'EmailSubject' => '',
+        ];
+
+        if (is_numeric($activity)) {
+            $activityID = $activity;
+            $activity = $this->getID($activityID);
+        } else {
+            $activityID = val('ActivityID', $activity);
+        }
+
+        if (!$activity) {
+            return false;
+        }
+
+        $activity = (array)$activity;
+
+        $user = $this->userModel->getID($activity['NotifyUserID'], DATASET_TYPE_ARRAY);
+        if (!$user) {
+            return false;
+        }
+
+        $activity["Headline"] = $this->getActivityHeadline($activity, $user);
+
+        // Build the email to send.
+        $email = new Gdn_Email();
+        $email->subject($this->getEmailSubjectFormatted($activity, $options));
+        $email->to($user);
+
+        $url = externalUrl(val('Route', $activity) == '' ? '/' : val('Route', $activity));
+
+        $emailTemplate = $email->getEmailTemplate()
+            ->setButton($url, val('ActionText', $activity, t('Check it out')))
+            ->setTitle($this->getEmailSubject($activity, $options));
+
+        if ($message = $this->getEmailMessage($activity)) {
+            $emailTemplate->setMessage($message, true);
+        }
+
+        $email->setEmailTemplate($emailTemplate);
+
+        // Fire an event for the notification.
+        $notification = ['ActivityID' => $activityID, 'User' => $user, 'Email' => $email, 'Route' => $activity['Route'], 'Story' => $activity['Story'], 'Headline' => $activity['Headline'], 'Activity' => $activity];
+        $this->EventArguments = $notification;
+        $this->fireEvent('BeforeSendNotification');
+
+        // Only send if the user is not banned
+        if (!val('Banned', $user)) {
+            $activity['Emailed'] = $this->sendEmail($email, $activity, $options);
+            if ($activity['Emailed'] === self::SENT_OK) {
+                // Delete the activity now that it has been emailed.
+                if (!$options['NoDelete'] && !$activity['Notified']) {
+                    if (val('ActivityID', $activity)) {
+                        $this->delete($activity['ActivityID']);
+                    } else {
+                        $activity['_Delete'] = true;
+                    }
+                }
+            }
+        } else {
+            $activity['Emailed'] = self::SENT_SKIPPED;
+        }
+
+        if ($activityID) {
+            // Save the emailed flag back to the activity.
+            $this->SQL->put('Activity', ['Emailed' => $emailed], ['ActivityID' => $activityID]);
+        }
+        return true;
+    }
+
+    /**
+     * Given an activity, generate a fully-formatted headline.
+     *
+     * @param array $activity
+     * @return string
+     */
+    private function getActivityHeadline(array $activity, array $user): string {
+        // Format the activity headline based on the user being emailed.
+        if (val('HeadlineFormat', $activity)) {
+            $sessionUserID = Gdn::session()->UserID;
+            Gdn::session()->UserID = $user['UserID'];
+            $result = formatString($activity['HeadlineFormat'], $activity);
+            Gdn::session()->UserID = $sessionUserID;
+        } else {
+            if (!isset($activity['ActivityGender'])) {
+                $aT = self::getActivityType($activity['ActivityType']);
+
+                $data = [$activity];
+                self::joinUsers($data);
+                $activity = $data[0];
+                $activity['RouteCode'] = val('RouteCode', $aT);
+                $activity['FullHeadline'] = val('FullHeadline', $aT);
+                $activity['ProfileHeadline'] = val('ProfileHeadline', $aT);
+            }
+
+            $result = Gdn_Format::activityHeadline($activity, '', $user['UserID']);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Get the unformatted subject line for an activity email.
+     *
+     * @param array $activity
+     * @param array $options
+     * @return string
+     */
+    private function getEmailSubject(array $activity, array $options): string {
+        $emailSubject = $options["EmailSubject"] ?? null;
+        $headline = $this->formatService->renderPlainText($activity["Headline"], Formats\HtmlFormat::FORMAT_KEY);
+        if ($emailSubject) {
+            $emailSubject = $headline.' in '.$emailSubject;
+        }
+        $result = $emailSubject ?: $headline;
+        return $result;
+    }
+
+    /**
+     * Get the subject line for an activity email, formatted per the activity data.
+     *
+     * @param array $activity
+     * @param array $options
+     * @return string
+     */
+    private function getEmailSubjectFormatted(array $activity, array $options): string {
+        $subject = $this->getEmailSubject($activity, $options);
+        $result = sprintf(
+            t("[%1\$s] %2\$s"),
+            c("Garden.Title"),
+            $subject
+        );
+        return $result;
+    }
+
+    /**
+     * @var array The Notification Queue is used to stack up notifications to users. Ensures
+     * that they only receive one notification about a single topic. For example:
+     * if someone comments on a discussion that they started and they have
+     * bookmarked, it will only notify them about one or the other, not both.
+     *
+     * This code makes the assumption that the queue is used for one user action
+     * at a time. For example: a comment being added to a discussion. The queue
+     * should be cleared before it is used, and sending the queue will clear it
+     * again.
+     */
+    private $_NotificationQueue = [];
+
+    /**
+     * Clear notification queue.
+     *
+     * @since 2.0.17
+     * @access public
+     */
+    public function clearNotificationQueue() {
+        unset($this->_NotificationQueue);
+        $this->_NotificationQueue = [];
+    }
+
+    /**
+     * Save a comment on an activity.
+     *
+     * @param array $comment
+     * @return int|bool|string
+     * @since 2.1
+     */
+    public function comment($comment) {
+        $comment['InsertUserID'] = Gdn::session()->UserID;
+        $comment['DateInserted'] = Gdn_Format::toDateTime();
+        $comment['InsertIPAddress'] = ipEncode(Gdn::request()->ipAddress());
+
+        $this->Validation->applyRule('ActivityID', 'Required');
+        $this->Validation->applyRule('Body', 'Required');
+        $this->Validation->applyRule('DateInserted', 'Required');
+        $this->Validation->applyRule('InsertUserID', 'Required');
+
+        $this->EventArguments['Comment'] = &$comment;
+        $this->fireEvent('BeforeSaveComment');
+
+        if ($this->validate($comment)) {
+            $activity = $this->getID($comment['ActivityID'], DATASET_TYPE_ARRAY);
+
+            $_ActivityID = $comment['ActivityID'];
+            // Check to see if this is a shared activity/notification.
+            if ($commentActivityID = val('CommentActivityID', $activity['Data'])) {
+                Gdn::controller()->json('CommentActivityID', $commentActivityID);
+                $comment['ActivityID'] = $commentActivityID;
+            }
+
+            $storageObject = FloodControlHelper::configure($this, 'Vanilla', 'ActivityComment');
+            if ($this->checkUserSpamming(Gdn::session()->User->UserID, $storageObject)) {
+                return false;
+            }
+
+            // Check for spam.
+            $spam = SpamModel::isSpam('ActivityComment', $comment);
+            if ($spam) {
+                return SPAM;
+            }
+
+            // Check for approval
+            $approvalRequired = checkRestriction('Vanilla.Approval.Require');
+            if ($approvalRequired && !val('Verified', Gdn::session()->User)) {
+                LogModel::insert('Pending', 'ActivityComment', $comment);
+                return UNAPPROVED;
+            }
+
+            $iD = $this->SQL->insert('ActivityComment', $comment);
+
+            if ($iD) {
+                // Check to see if this comment bumps the activity.
+                if ($activity && val('Bump', $activity['Data'])) {
+                    $this->SQL->put('Activity', ['DateUpdated' => $comment['DateInserted']], ['ActivityID' => $activity['ActivityID']]);
+                    if ($_ActivityID != $comment['ActivityID']) {
+                        $this->SQL->put('Activity', ['DateUpdated' => $comment['DateInserted']], ['ActivityID' => $_ActivityID]);
+                    }
+                }
+
+                // Send a notification to the original person.
+                if (val('ActivityType', $activity) === 'WallPost') {
+                    $this->notifyWallComment($comment, $activity);
+                }
+            }
+
+            return $iD;
+        }
+        return false;
+    }
+
+    /**
+     * Send all notifications in the queue.
+     *
+     * @since 2.0.17
+     * @access public
+     */
+    public function sendNotificationQueue() {
+        foreach ($this->_NotificationQueue as $userID => $notifications) {
+            if (is_array($notifications)) {
+                // Only send out one notification per user.
+                $notification = $notifications[0];
+
+                /* @var Gdn_Email $Email */
+                $email = $notification['Email'];
+
+                if (is_object($email) && method_exists($email, 'send')) {
+                    $this->EventArguments = $notification;
+                    $this->fireEvent('BeforeSendNotification');
+
+                    try {
+                        // Only send if the user is not banned
+                        $user = $this->userModel->getID($userID);
+                        if (!val('Banned', $user)) {
+                            $email->send();
+                            $emailed = self::SENT_OK;
+                        } else {
+                            $emailed = self::SENT_SKIPPED;
+                        }
+                    } catch (\PHPMailer\PHPMailer\Exception $pex) {
+                        if ($pex->getCode() == PHPMailer::STOP_CRITICAL && !$email->PhpMailer->isServerError($pex)) {
+                            $emailed = self::SENT_FAIL;
+                        } else {
+                            $emailed = self::SENT_ERROR;
+                        }
+                    } catch (Exception $ex) {
+                        switch ($ex->getCode()) {
+                            case Gdn_Email::ERR_SKIPPED:
+                                $emailed = self::SENT_SKIPPED;
+                                break;
+                            default:
+                                $emailed = self::SENT_FAIL;
+                        }
+                    }
+
+                    try {
+                        $this->SQL->put('Activity', ['Emailed' => $emailed], ['ActivityID' => $notification['ActivityID']]);
+                    } catch (Exception $ex) {
+                        // Ignore an exception in a behind-the-scenes notification.
+                    }
+                }
+            }
+        }
+
+        // Clear out the queue
+        unset($this->_NotificationQueue);
+        $this->_NotificationQueue = [];
+    }
+
+    /**
+     * Get total unread notifications for a user.
+     *
+     * @param int $userID
+     */
+    public function getUserTotalUnread($userID) {
+        if (!$userID) {
+            return 0; // If false or null or 0 (guest) get called, we don't have any notifications.
+        }
+        $key = sprintf(self::NOTIFICATIONS_COUNT_CACHE_KEY, $userID);
+        $notificationCount = $this->cache->get($key, null);
+        if ($notificationCount === null) {
+            $notifications = $this->SQL
+                ->select("ActivityID", "count", "total")
+                ->from($this->Name)
+                ->where("NotifyUserID", $userID)
+                ->where("Notified", self::SENT_PENDING)
+                ->get()
+                ->resultArray();
+            if (!is_array($notifications) || !isset($notifications[0])) {
+                $notificationCount = 0;
+            } else {
+                $notificationCount = $notifications[0]["total"] ?? 0;
+            }
+            $this->cache->set($key, $notificationCount, self::NOTIFICATION_COUNT_TTL);
+        }
+        return $notificationCount;
+    }
+
+    /**
+     * Get total notifications for a user.
+     *
+     * @param integer $notifyUser Enum: NOTIFY_PUBLIC, NOTIFY_MODS, NOTIFY_ADMINS
+     * @return integer
+     */
+    public function getUserTotal(int $notifyUser): int {
+        $notifications = $this->SQL
+            ->select("ActivityID", "count", "total")
+            ->from($this->Name)
+            ->where("NotifyUserID", $notifyUser)
+            ->get()
+            ->resultArray();
+        if (!is_array($notifications) || !isset($notifications[0])) {
+            return 0;
+        }
+        return $notifications[0]["total"] ?? 0;
+    }
+
+    /**
+     * Mark activities as notified
+     *
+     * @param array $activityIDs
+     */
+    public function setNotified($activityIDs) {
+        if (!is_array($activityIDs) || count($activityIDs) == 0) {
+            return;
+        }
+
+        $this->SQL->update('Activity')
+            ->set('Notified', self::SENT_OK)
+            ->whereIn('ActivityID', $activityIDs)
+            ->put();
+    }
+
+    /**
+     *
+     *
+     * @param $activity
+     * @throws Exception
+     */
+    public function share(&$activity) {
+        // Massage the event for the user.
+        $this->EventArguments['RecordType'] = 'Activity';
+        $this->EventArguments['Activity'] =& $activity;
+
+        $this->fireEvent('Share');
+    }
+
+    /**
+     * Queue a notification for sending.
+     *
+     * @since 2.0.17
+     * @access public
+     * @param int $activityID
+     * @param string $story
+     * @param string $position
+     * @param bool $force
+     */
+    public function queueNotification($activityID, $story = '', $position = 'last', $force = false) {
+        $activity = $this->getID($activityID);
+        if (!is_object($activity)) {
+            return;
+        }
+
+        $story = Gdn_Format::text($story == '' ? $activity->Story : $story, false);
+        // If this is a comment on another activity, fudge the activity a bit so that everything appears properly.
+        if (is_null($activity->RegardingUserID) && $activity->CommentActivityID > 0) {
+            $commentActivity = $this->getID($activity->CommentActivityID);
+            $activity->RegardingUserID = $commentActivity->RegardingUserID;
+            $activity->Route = '/activity/item/'.$activity->CommentActivityID;
+        }
+        $user = $this->userModel->getID($activity->RegardingUserID, DATASET_TYPE_OBJECT);
+
+        if ($user) {
+            if ($force) {
+                $preference = $force;
+            } else {
+                $configPreference = c('Preferences.Email.'.$activity->ActivityType, '0');
+                if ($configPreference !== false) {
+                    $preference = val('Email.'.$activity->ActivityType, $user->Preferences, $configPreference);
+                } else {
+                    $preference = false;
+                }
+            }
+
+            if ($preference) {
+                $activityHeadline = Gdn_Format::text(Gdn_Format::activityHeadline($activity, $activity->ActivityUserID, $activity->RegardingUserID), false);
+                $email = new Gdn_Email();
+                $email->subject(sprintf(t('[%1$s] %2$s'), Gdn::config('Garden.Title'), $activityHeadline));
+                $email->to($user);
+                $url = externalUrl(val('Route', $activity) == '' ? '/' : val('Route', $activity));
+
+                $emailTemplate = $email->getEmailTemplate()
+                    ->setButton($url, val('ActionText', $activity, t('Check it out')))
+                    ->setTitle(Gdn_Format::plainText(val('Headline', $activity)));
+
+                if ($message = $this->getEmailMessage($activity)) {
+                    $emailTemplate->setMessage($message, true);
+                }
+
+                $email->setEmailTemplate($emailTemplate);
+
+                if (!array_key_exists($user->UserID, $this->_NotificationQueue)) {
+                    $this->_NotificationQueue[$user->UserID] = [];
+                }
+
+                $notification = ['ActivityID' => $activityID, 'User' => $user, 'Email' => $email, 'Route' => $activity->Route, 'Story' => $story, 'Headline' => $activityHeadline, 'Activity' => $activity];
+                if ($position == 'first') {
+                    $this->_NotificationQueue[$user->UserID] = array_merge([$notification], $this->_NotificationQueue[$user->UserID]);
+                } else {
+                    $this->_NotificationQueue[$user->UserID][] = $notification;
+                }
+            }
+        }
+    }
+
+    /**
+     * Queue an activity for saving later.
+     *
+     * @param array $data The data in the activity.
+     * @param string|bool $preference The name of the preference governing the activity.
+     * @param array $options Additional options for saving.
+     * @throws Exception
+     */
+    public function queue($data, $preference = false, $options = []) {
+        $this->_touch($data);
+        if (!isset($data['NotifyUserID']) || !isset($data['ActivityType'])) {
+            throw new Exception('Data missing NotifyUserID and/or ActivityType', 400);
+        }
+
+        if ($data['ActivityUserID'] == $data['NotifyUserID'] && !val('Force', $options)) {
+            return; // don't notify users of something they did.
+        }
+        $notified = $data['Notified'];
+        $emailed = $data['Emailed'];
+
+        if (isset(self::$Queue[$data['NotifyUserID']][$data['ActivityType']])) {
+            [$currentData, $currentOptions] = self::$Queue[$data['NotifyUserID']][$data['ActivityType']];
+
+            $notified = $notified ? $notified : $currentData['Notified'];
+            $emailed = $emailed ? $emailed : $currentData['Emailed'];
+
+            $reason = null;
+            if (isset($currentData['Data']['Reason']) && isset($data['Data']['Reason'])) {
+                $reason = array_merge((array)$currentData['Data']['Reason'], (array)$data['Data']['Reason']);
+                $reason = array_unique($reason);
+            }
+
+            $data = array_merge($currentData, $data);
+            $options = array_merge($currentOptions, $options);
+            if ($reason) {
+                $data['Data']['Reason'] = $reason;
+            }
+        }
+
+        $this->EventArguments['Preference'] = $preference;
+        $this->EventArguments['Options'] = $options;
+        $this->EventArguments['Data'] = &$data;
+        $this->fireEvent('BeforeCheckPreference');
+        if (!empty($preference)) {
+            [$popup, $email] = self::notificationPreference($preference, $data['NotifyUserID'], 'both');
+            if (!$popup && !$email) {
+                return; // don't queue if user doesn't want to be notified at all.
+            }
+            if ($popup) {
+                $notified = self::SENT_PENDING;
+            }
+            if ($email) {
+                $emailed = self::SENT_PENDING;
+            }
+        }
+        $data['Notified'] = $notified;
+        $data['Emailed'] = $emailed;
+
+        self::$Queue[$data['NotifyUserID']][$data['ActivityType']] = [$data, $options];
+    }
+
+    /**
+     * Set the story for an activity to an excerpt of the original.
+     *
+     * @param array $activity
+     * @param int $length
+     * @return array
+     */
+    public function setStoryExcerpt(array $activity, int $length = self::DEFAULT_EXCERPT_LENGTH): array {
+        if (!isset($activity["Story"]) || !isset($activity["Format"])) {
+            return $activity;
+        }
+
+        $excerpt = Gdn::formatService()->renderExcerpt($activity["Story"], $activity["Format"]);
+        $excerpt = sliceString(rtrim($excerpt, "…"), $length, "…");
+
+        $activity["Story"] = $excerpt;
+        $activity["Format"] = TextFormat::FORMAT_KEY;
+        return $activity;
+    }
+
+    /**
+     * Save an activity.
+     *
+     * @param array $data
+     * @param bool $preference
+     * @param array $options
+     * @return array|bool|string|null
+     * @throws Exception
+     */
+    public function save($data, $preference = false, $options = []) {
+        trace('ActivityModel->save()');
+        $activity = $data;
+        $this->_touch($activity);
+        $queueEmail = $options["QueueEmail"] ?? false;
+
+        $extraFields = $data["Ext"] ?? [];
+        unset($data["Ext"]);
+        $emailFields = $extraFields["Email"] ?? [];
+
+        if ($activity['ActivityUserID'] == $activity['NotifyUserID'] && !val('Force', $options)) {
+            trace('Skipping activity because it would notify the user of something they did.');
+
+            return null; // don't notify users of something they did.
+        }
+
+        // Check the user's preference.
+        if ($preference) {
+            [$popup, $email] = self::notificationPreference($preference, $activity['NotifyUserID'], 'both');
+
+            if ($popup && !$activity['Notified']) {
+                $activity['Notified'] = self::SENT_PENDING;
+            }
+            if ($email && !$activity['Emailed']) {
+                $activity['Emailed'] = self::SENT_PENDING;
+            }
+
+            if (!$activity['Notified'] && !$activity['Emailed'] && !val('Force', $options)) {
+                trace("Skipping activity because the user has no preference set.");
+                return null;
+            }
+        }
+
+        $activityType = self::getActivityType($activity['ActivityType']);
+        $activityTypeID = val('ActivityTypeID', $activityType);
+        if (!$activityTypeID) {
+            trace("There is no $activityType activity type.", TRACE_WARNING);
+            $activityType = self::getActivityType('Default');
+            $activityTypeID = val('ActivityTypeID', $activityType);
+        }
+
+        $activity['ActivityTypeID'] = $activityTypeID;
+
+        $notificationInc = 0;
+        if ($activity['NotifyUserID'] > 0 && $activity['Notified']) {
+            $notificationInc = 1;
+        }
+
+        // Check to see if we are sharing this activity with another one.
+        if ($commentActivityID = val('CommentActivityID', $activity['Data'])) {
+            $commentActivity = $this->getID($commentActivityID);
+            $activity['Data']['CommentNotifyUserID'] = $commentActivity['NotifyUserID'];
+        }
+
+        // Make sure this activity isn't a duplicate.
+        if (val('CheckRecord', $options)) {
+            // Check to see if this record already notified so we don't notify multiple times.
+            $where = arrayTranslate($activity, ['NotifyUserID', 'RecordType', 'RecordID']);
+            $where['DateUpdated >'] = Gdn_Format::toDateTime(strtotime('-2 days')); // index hint
+
+            $checkActivity = $this->SQL->getWhere(
+                'Activity',
+                $where
+            )->firstRow();
+
+            if ($checkActivity) {
+                return false;
+            }
+        }
+
+        // Check to share the activity.
+        if (val('Share', $options)) {
+            $this->share($activity);
+        }
+
+        // Group he activity.
+        if ($groupBy = val('GroupBy', $options)) {
+            $groupBy = (array)$groupBy;
+            $where = [];
+            foreach ($groupBy as $columnName) {
+                $where[$columnName] = $activity[$columnName];
+            }
+            $where['NotifyUserID'] = $activity['NotifyUserID'];
+            // Make sure to only group activities by day.
+            $where['DateInserted >'] = Gdn_Format::toDateTime(strtotime('-1 day'));
+
+            // See if there is another activity to group these into.
+            $groupActivity = $this->SQL->getWhere(
+                'Activity',
+                $where
+            )->firstRow(DATASET_TYPE_ARRAY);
+
+            if ($groupActivity) {
+                $groupActivity['Data'] = dbdecode($groupActivity['Data']);
+                $activity = $this->mergeActivities($groupActivity, $activity);
+                $notificationInc = 0;
+            }
+        }
+
+        $delete = false;
+        if ($activity['Emailed'] == self::SENT_PENDING && !$queueEmail) {
+            $emailActivity = $emailFields + $activity;
+            $this->email($emailActivity, $options);
+            $delete = val('_Delete', $emailActivity);
+            $activity["Emailed"] = $emailActivity["Emailed"];
+        }
+
+        $activityData = $activity['Data'];
+        if (isset($activity['Data']) && is_array($activity['Data'])) {
+            $activity['Data'] = dbencode($activity['Data']);
+        }
+
+        $this->defineSchema();
+        $activity = $this->filterSchema($activity);
+
+        $activityID = val('ActivityID', $activity);
+        if (!$activityID) {
+            if (!$delete) {
+                if (!val('DisableFloodControl', $options)) {
+                    $storageObject = FloodControlHelper::configure($this, 'Vanilla', 'Activity');
+                    if ($this->checkUserSpamming(Gdn::session()->UserID, $storageObject)) {
+                        return false;
+                    }
+                }
+
+                $this->addInsertFields($activity);
+                touchValue('DateUpdated', $activity, $activity['DateInserted']);
+
+                $this->EventArguments['Activity'] =& $activity;
+                $this->EventArguments['ActivityID'] = null;
+
+                $handled = false;
+                $this->EventArguments['Handled'] =& $handled;
+
+                $this->fireEvent('BeforeSave');
+
+                if (count($this->validationResults()) > 0) {
+                    return false;
+                }
+
+                if ($handled) {
+                    // A plugin handled this activity so don't save it.
+                    return $activity;
+                }
+
+                if (val('CheckSpam', $options)) {
+                    // Check for spam
+                    $spam = SpamModel::isSpam('Activity', $activity);
+                    if ($spam) {
+                        return SPAM;
+                    }
+
+                    // Check for approval
+                    $approvalRequired = checkRestriction('Vanilla.Approval.Require');
+                    if ($approvalRequired && !val('Verified', Gdn::session()->User)) {
+                        LogModel::insert('Pending', 'Activity', $activity);
+                        return UNAPPROVED;
+                    }
+                }
+
+                $activityID = $this->SQL->insert('Activity', $activity);
+                $activity['ActivityID'] = $activityID;
+
+                if ($activity["Notified"] === self::SENT_PENDING || $activity['Emailed'] == self::SENT_PENDING) {
+                    $eventActivity = $this->getWhere(
+                        ["ActivityID" => $activityID],
+                        "",
+                        "",
+                        1
+                    )->firstRow() ?? [];
+                    $event = $this->notificationEventFromRow(
+                        $eventActivity,
+                        NotificationEvent::ACTION_INSERT
+                    );
+
+                    if ($event instanceof ResourceEvent) {
+                        $this->eventDispatcher->dispatch($event);
+                    }
+                }
+
+                if ($activity['Emailed'] == self::SENT_PENDING) {
+                    $this->queueEmail($emailFields + $activity, $options);
+                }
+
+                $this->prune();
+            }
+        } else {
+            $activity['DateUpdated'] = Gdn_Format::toDateTime();
+            unset($activity['ActivityID']);
+
+            $this->EventArguments['Activity'] =& $activity;
+            $this->EventArguments['ActivityID'] = $activityID;
+            $this->fireEvent('BeforeSave');
+
+            if (count($this->validationResults()) > 0) {
+                return false;
+            }
+
+            $this->SQL->put('Activity', $activity, ['ActivityID' => $activityID]);
+            $activity['ActivityID'] = $activityID;
+        }
+        $activity['Data'] = $activityData;
+
+        if (isset($commentActivity)) {
+            $commentActivity['Data']['SharedActivityID'] = $activity['ActivityID'];
+            $commentActivity['Data']['SharedNotifyUserID'] = $activity['NotifyUserID'];
+            $this->setField($commentActivity['ActivityID'], 'Data', $commentActivity['Data']);
+        }
+
+        if ($notificationInc > 0 && ($notifyUser = $this->userModel->getID($activity['NotifyUserID']))) {
+            $countNotifications = $notifyUser->CountNotifications + $notificationInc;
+            $this->userModel->setField($activity['NotifyUserID'], 'CountNotifications', $countNotifications);
+        }
+
+        // If this is a wall post then we need to notify on that.
+        if (val('Name', $activityType) == 'WallPost' && $activity['NotifyUserID'] == self::NOTIFY_PUBLIC) {
+            $this->notifyWallPost($activity);
+        }
+
+        return $activity;
+    }
+
+    /**
+     * Update a single activity's notification fields to reflect a read status.
+     *
+     * @param int $activityID
+     */
+    public function markSingleRead(int $activityID) {
+        $this->SQL->put(
+            "Activity",
+            ["Notified" => self::SENT_OK, "Emailed" => self::SENT_OK],
+            ["ActivityID" => $activityID]
+        );
+    }
+
+    /**
+     *
+     *
+     * @param $userID
+     */
+    public function markRead($userID) {
+        // Mark all of a user's unread activities read.
+        $this->SQL->put(
             'Activity',
-            $Where)->FirstRow();
-         
-         if ($CheckActivity)
-            return FALSE;
-      }
-      
-      // Check to share the activity.
-      if (GetValue('Share', $Options)) {
-         $this->Share($Activity);
-      }
-      
-      // Group he activity.
-      if ($GroupBy = GetValue('GroupBy', $Options)) {
-         $GroupBy = (array)$GroupBy;
-         $Where = array();
-         foreach ($GroupBy as $ColumnName) {
-            $Where[$ColumnName] = $Activity[$ColumnName];
-         }
-         $Where['NotifyUserID'] = $Activity['NotifyUserID'];
-         // Make sure to only group activities by day.
-         $Where['DateInserted >'] = Gdn_Format::ToDateTime(strtotime('-1 day'));
-         
-         // See if there is another activity to group these into.
-         $GroupActivity = $this->SQL->GetWhere(
-            'Activity', 
-            $Where)->FirstRow(DATASET_TYPE_ARRAY);
-         
-         if ($GroupActivity) {
-            $GroupActivity['Data'] = @unserialize($GroupActivity['Data']);
-            $Activity = $this->MergeActivities($GroupActivity, $Activity);
-            $NotificationInc = 0;
-         }
-      }
-      
-      $Delete = FALSE;
-      if ($Activity['Emailed'] == self::SENT_PENDING) {
-         $this->Email($Activity);
-         $Delete = GetValue('_Delete', $Activity);
-      }
-      
-      $ActivityData = $Activity['Data'];
-      if (isset($Activity['Data']) && is_array($Activity['Data'])) {
-         $Activity['Data'] = serialize($Activity['Data']);
-      }
-      
-      $this->DefineSchema();
-      $Activity = $this->FilterSchema($Activity);
-      
-      $ActivityID = GetValue('ActivityID', $Activity);
-      if (!$ActivityID) {
-         if (!$Delete) {
-            $this->AddInsertFields($Activity);
-            TouchValue('DateUpdated', $Activity, $Activity['DateInserted']);
-            
-            $this->EventArguments['Activity'] =& $Activity;
-            $this->EventArguments['ActivityID'] = NULL;
-            
-            $Handled = FALSE;
-            $this->EventArguments['Handled'] =& $Handled;
-            
-            $this->FireEvent('BeforeSave');
-            
-            if (count($this->ValidationResults()) > 0)
-               return FALSE;
-            
-            if ($Handled) {
-               // A plugin handled this activity so don't save it.
-               return $Activity;
+            ['Notified' => self::SENT_OK],
+            ['NotifyUserID' => $userID, 'Notified' => self::SENT_PENDING]
+        );
+
+        $user = $this->userModel->getID($userID);
+        if (val('CountNotifications', $user) != 0) {
+            $this->userModel->setField($userID, 'CountNotifications', 0);
+        }
+    }
+
+    /**
+     *
+     *
+     * @param $oldActivity
+     * @param $newActivity
+     * @param array $options
+     * @return array
+     */
+    public function mergeActivities($oldActivity, $newActivity, $options = []) {
+        // Group the two activities together.
+        $activityUserIDs = val('ActivityUserIDs', $oldActivity['Data'], []);
+        $activityUserCount = val('ActivityUserID_Count', $oldActivity['Data'], 0);
+        array_unshift($activityUserIDs, $oldActivity['ActivityUserID']);
+        if (($i = array_search($newActivity['ActivityUserID'], $activityUserIDs)) !== false) {
+            unset($activityUserIDs[$i]);
+            $activityUserIDs = array_values($activityUserIDs);
+        }
+        $activityUserIDs = array_unique($activityUserIDs);
+        if (count($activityUserIDs) > self::$MaxMergeCount) {
+            array_pop($activityUserIDs);
+            $activityUserCount++;
+        }
+
+        $regardingUserCount = 0;
+        if (val('RegardingUserID', $newActivity)) {
+            $regardingUserIDs = val('RegardingUserIDs', $oldActivity['Data'], []);
+            $regardingUserCount = val('RegardingUserID_Count', $oldActivity['Data'], 0);
+            array_unshift($regardingUserIDs, $oldActivity['RegardingUserID']);
+            if (($i = array_search($newActivity['RegardingUserID'], $regardingUserIDs)) !== false) {
+                unset($regardingUserIDs[$i]);
+                $regardingUserIDs = array_values($regardingUserIDs);
             }
-            
-            if (GetValue('CheckSpam', $Options)) {
-               // Check for spam
-            	$Spam = SpamModel::IsSpam('Activity', $Activity);
-               if ($Spam)
-                  return SPAM;
-                  
-            	// Check for approval
-		         $ApprovalRequired = CheckRestriction('Vanilla.Approval.Require');
-		         if ($ApprovalRequired && !GetValue('Verified', Gdn::Session()->User)) {
-		         	LogModel::Insert('Pending', 'Activity', $Activity);
-		         	return UNAPPROVED;
-		         }
+            if (count($regardingUserIDs) > self::$MaxMergeCount) {
+                array_pop($regardingUserIDs);
+                $regardingUserCount++;
             }
-            
-            $ActivityID = $this->SQL->Insert('Activity', $Activity);
-            $Activity['ActivityID'] = $ActivityID;
-         }
-      } else {
-         $Activity['DateUpdated'] = Gdn_Format::ToDateTime();
-         unset($Activity['ActivityID']);
-         
-         $this->EventArguments['Activity'] =& $Activity;
-         $this->EventArguments['ActivityID'] = $ActivityID;
-         $this->FireEvent('BeforeSave');
-         
-         if (count($this->ValidationResults()) > 0)
-               return FALSE;
-         
-         $this->SQL->Put('Activity', $Activity, array('ActivityID' => $ActivityID));
-         $Activity['ActivityID'] = $ActivityID;
-      }
-      $Activity['Data'] = $ActivityData;
-      
-      if (isset($CommentActivity)) {
-         $CommentActivity['Data']['SharedActivityID'] = $Activity['ActivityID'];
-         $CommentActivity['Data']['SharedNotifyUserID'] = $Activity['NotifyUserID'];
-         $this->SetField($CommentActivity['ActivityID'], 'Data', $CommentActivity['Data']);
-      }
-      
-      if ($NotificationInc > 0) {
-         $CountNotifications =  Gdn::UserModel()->GetID($Activity['NotifyUserID'])->CountNotifications + $NotificationInc;
-         Gdn::UserModel()->SetField($Activity['NotifyUserID'], 'CountNotifications', $CountNotifications);
-      }
-      
-      // If this is a wall post then we need to notify on that.
-      if (GetValue('Name', $ActivityType) == 'WallPost' && $Activity['NotifyUserID'] == self::NOTIFY_PUBLIC) {
-         $this->NotifyWallPost($Activity);
-      }
-      
-      return $Activity;
-   }
-   
-   public function MarkRead($UserID) {
-      // Mark all of a user's unread activities read.
-      $this->SQL->Put(
-         'Activity',
-         array('Notified' => self::SENT_OK),
-         array('NotifyUserID' => $UserID, 'Notified' => self::SENT_PENDING));
-      
-      $User = Gdn::UserModel()->GetID($UserID);
-      if (GetValue('CountNotifications', $User) != 0)
-         Gdn::UserModel()->SetField($UserID, 'CountNotifications', 0);
-   }
-   
-   public function MergeActivities($OldActivity, $NewActivity, $Options = array()) {
-      $GroupHeadlineFormat = GetValue('GroupHeadlineFormat', $Options, $NewActivity['HeadlineFormat']);
-      $GroupStory = GetValue('GroupStory', $Options, $NewActivity['Story']);
-      
-//      decho($OldActivity, 'OldAct');
+        }
 
-      // Group the two activities together.
-      $ActivityUserIDs = GetValue('ActivityUserIDs', $OldActivity['Data'], array());
-      $ActivityUserCount = GetValue('ActivityUserID_Count', $OldActivity['Data'], 0);
-      array_unshift($ActivityUserIDs, $OldActivity['ActivityUserID']);
-      if (($i = array_search($NewActivity['ActivityUserID'], $ActivityUserIDs)) !== FALSE) {
-         unset($ActivityUserIDs[$i]);
-         $ActivityUserIDs = array_values($ActivityUserIDs);
-      }
-      $ActivityUserIDs = array_unique($ActivityUserIDs);
-      if (count($ActivityUserIDs) > self::$MaxMergeCount) {
-         array_pop($ActivityUserIDs);
-         $ActivityUserCount++;
-      }
-      
-//      decho($ActivityUserIDs, 'AIDs');
-      
-      if (GetValue('RegardingUserID', $NewActivity)) {
-         $RegardingUserIDs = GetValue('RegardingUserIDs', $OldActivity['Data'], array());
-         $RegardingUserCount = GetValue('RegardingUserID_Count', $OldActivity['Data'], 0);
-         array_unshift($RegardingUserIDs, $OldActivity['RegardingUserID']);
-         if (($i = array_search($NewActivity['RegardingUserID'])) !== FALSE) {
-            unset($RegardingUserIDs[$i]);
-            $RegardingUserIDs = array_values($RegardingUserIDs);
-         }
-         if (count($RegardingUserIDs) > self::$MaxMergeCount) {
-            array_pop($RegardingUserIDs);
-            $RegardingUserCount++;
-         }
-      }
+        $recordIDs = [];
+        if ($oldActivity['RecordID']) {
+            $recordIDs[] = $oldActivity['RecordID'];
+        }
+        $recordIDs = array_unique($recordIDs);
 
-      $RecordIDs = GetValue('RecordIDs', $GroupData, array());
-      if ($OldActivity['RecordID'])
-         $RecordIDs[] = $OldActivity['RecordID'];
-      $RecordIDs = array_unique($RecordIDs);
+        $newActivity = array_merge($oldActivity, $newActivity);
 
-      $NewActivity = array_merge($OldActivity, $NewActivity);
-      
-      if (count($ActivityUserIDs) > 0)
-         $NewActivity['Data']['ActivityUserIDs'] = $ActivityUserIDs;
-      if ($ActivityUserCount)
-         $NewActivity['Data']['ActivityUserID_Count'] = $ActivityUserCount;
-      if (count($RecordIDs) > 0)
-         $NewActivity['Data']['RecordIDs'] = $RecordIDs;
-      if (isset($RegardingUserIDs) && count($RegardingUserIDs) > 0) {
-         $NewActivity['Data']['RegardingUserIDs'] = $RegardingUserIDs;
-         
-         if ($RegardingUserCount)
-            $NewActivity['Data']['RegardingUserID_Count'] = $RegardingUserCount;
-      }
-      
-//      decho($NewActivity, 'MergedActivity');
-//      die();
-      return $NewActivity;
-   }
-   
-   protected function NotifyWallPost($WallPost) {
-      $NotifyUser = Gdn::UserModel()->GetID($WallPost['ActivityUserID']);
-      
-      $Activity = array(
-         'ActivityType' => 'WallPost',
-         'ActivityUserID' => $WallPost['RegardingUserID'],
-         'Format' => $WallPost['Format'],
-         'NotifyUserID' => $WallPost['ActivityUserID'],
-         'RecordType' => 'Activity',
-         'RecordID' => $WallPost['ActivityID'],
-         'RegardingUserID' => $WallPost['ActivityUserID'],
-         'Route' => UserUrl($NotifyUser, ''),
-         'Story' => $WallPost['Story'],
-         'HeadlineFormat' => T('HeadlineFormat.NotifyWallPost', '{ActivityUserID,User} posted on your <a href="{Url,url}">wall</a>.')
-      );
-      
-      $this->Save($Activity, 'WallComment');
-   }
-   
-   public function SaveQueue() {
-      $Result = array();
-      foreach (self::$Queue as $UserID => $Activities) {
-         foreach ($Activities as $ActivityType => $Row) {
-            $Result[] = $this->Save($Row[0], FALSE, $Row[1]);
-         }
-      }
-      self::$Queue = array();
-      return $Result;
-   }
-   
-   protected function _Touch(&$Data) {
-      TouchValue('ActivityType', $Data, 'Default');
-      TouchValue('ActivityUserID', $Data, Gdn::Session()->UserID);
-      TouchValue('NotifyUserID', $Data, self::NOTIFY_PUBLIC);
-      TouchValue('Headline', $Data, NULL);
-      TouchValue('Story', $Data, NULL);
-      TouchValue('Notified', $Data, 0);
-      TouchValue('Emailed', $Data, 0);
-      TouchValue('Photo', $Data, NULL);
-      TouchValue('Route', $Data, NULL);
-      if (!isset($Data['Data']) || !is_array($Data['Data']))
-         $Data['Data'] = array();
-   }
+        if (count($activityUserIDs) > 0) {
+            $newActivity['Data']['ActivityUserIDs'] = $activityUserIDs;
+        }
+        if ($activityUserCount) {
+            $newActivity['Data']['ActivityUserID_Count'] = $activityUserCount;
+        }
+        if (count($recordIDs) > 0) {
+            $newActivity['Data']['RecordIDs'] = $recordIDs;
+        }
+        if (isset($regardingUserIDs) && count($regardingUserIDs) > 0) {
+            $newActivity['Data']['RegardingUserIDs'] = $regardingUserIDs;
+
+            if ($regardingUserCount) {
+                $newActivity['Data']['RegardingUserID_Count'] = $regardingUserCount;
+            }
+        }
+
+        return $newActivity;
+    }
+
+    /**
+     *  Fires beforeWallNotificationSend event.
+     *
+     * @param array $activity
+     * @param bool $notificationValid
+     */
+    private function verifyNotification(array $activity, bool &$notificationValid) {
+        $args = [
+            'Activity' => $activity,
+            'IsValid' => &$notificationValid,
+            'UserModel' => $this->userModel
+        ];
+        /** @var \Garden\EventManager $eventManager */
+        $eventManager = Gdn::getContainer()->get(EventManager::class);
+        $eventManager->fireFilter('activityModel_beforeWallNotificationSend', $this, $args);
+    }
+
+    /**
+     * Notify the user of wall comments.
+     *
+     * @param array $comment
+     * @param array $wallPost Activity data.
+     */
+    protected function notifyWallComment($comment, $wallPost) {
+        $notifyUser = $this->userModel->getID($wallPost['ActivityUserID']);
+
+        $activity = [
+            'ActivityType' => 'WallComment',
+            'ActivityUserID' => $comment['InsertUserID'],
+            'Format' => $comment['Format'],
+            'NotifyUserID' => $wallPost['ActivityUserID'],
+            'RecordType' => 'ActivityComment',
+            'RecordID' => $comment['ActivityCommentID'],
+            'RegardingUserID' => $wallPost['ActivityUserID'],
+            'Route' => userUrl($notifyUser, ''),
+            'Story' => $comment['Body'],
+            'HeadlineFormat' => t('HeadlineFormat.NotifyWallComment', '{ActivityUserID,User} commented on your <a href="{Url,url}">wall</a>.')
+        ];
+
+        $notificationValid = true;
+        $this->verifyNotification($activity, $notificationValid);
+        if ($notificationValid) {
+            $this->save($activity, 'WallComment');
+        }
+    }
+
+    /**
+     *
+     *
+     * @param $wallPost
+     */
+    protected function notifyWallPost($wallPost) {
+        $notifyUser = $this->userModel->getID($wallPost['ActivityUserID']);
+
+        $activity = [
+            'ActivityType' => 'WallPost',
+            'ActivityUserID' => $wallPost['RegardingUserID'],
+            'Format' => $wallPost['Format'],
+            'NotifyUserID' => $wallPost['ActivityUserID'],
+            'RecordType' => 'Activity',
+            'RecordID' => $wallPost['ActivityID'],
+            'RegardingUserID' => $wallPost['ActivityUserID'],
+            'Route' => userUrl($notifyUser, ''),
+            'Story' => $wallPost['Story'],
+            'HeadlineFormat' => t('HeadlineFormat.NotifyWallPost', '{ActivityUserID,User} posted on your <a href="{Url,url}">wall</a>.')
+        ];
+
+        $notificationValid = true;
+        $this->verifyNotification($activity, $notificationValid);
+        if ($notificationValid) {
+            $this->save($activity, 'WallComment');
+        }
+    }
+
+    /**
+     * Save all queued activity rows.
+     *
+     * @param bool $batchEmails Should emails be sent to multiple recipients when possible?
+     * @return array
+     */
+    public function saveQueue(bool $batchEmails = false) {
+        $result = [];
+        $options = [
+            "DisableFloodControl" => true,
+            "QueueEmail" => true,
+        ];
+
+        if (Gdn_Cache::activeEnabled()) {
+            // Prefetch users, so they're cached when retrieved in later operations.
+            $prefetchUserIDs = [];
+            foreach (self::$Queue as $activities) {
+                foreach ($activities as $row) {
+                    $activity = $row[0] ?? [];
+                    $notifyUserID = $activity["NotifyUserID"] ?? null;
+                    if ($notifyUserID > 0) {
+                        $prefetchUserIDs[$notifyUserID] = true;
+                    }
+                }
+            }
+            if (!empty($prefetchUserIDs)) {
+                // We don't care about the return values. We just want the records cached.
+                $prefetchUserIDs = array_keys($prefetchUserIDs);
+                $this->userModel->getDefaultSSOIDs($prefetchUserIDs);
+                $this->userModel->getIDs($prefetchUserIDs);
+            }
+        }
+
+        foreach (self::$Queue as $activities) {
+            foreach ($activities as $row) {
+                $result[] = $this->save($row[0], false, $options + $row[1]);
+            }
+        }
+        self::$Queue = [];
+        $this->sendEmailQueue();
+        return $result;
+    }
+
+    /**
+     *
+     *
+     * @param $data
+     */
+    protected function _touch(&$data) {
+        touchValue('ActivityType', $data, 'Default');
+        touchValue('ActivityUserID', $data, Gdn::session()->UserID);
+        touchValue('NotifyUserID', $data, self::NOTIFY_PUBLIC);
+        touchValue('Headline', $data, null);
+        touchValue('Story', $data, null);
+        touchValue('Notified', $data, 0);
+        touchValue('Emailed', $data, 0);
+        touchValue('Photo', $data, null);
+        touchValue('Route', $data, null);
+        if (!isset($data['Data']) || !is_array($data['Data'])) {
+            $data['Data'] = [];
+        }
+    }
+
+    /**
+     * Get the delete after time.
+     *
+     * @return string Returns a string compatible with {@link strtotime()}.
+     */
+    public function getPruneAfter() {
+        return $this->pruneAfter;
+    }
+
+    /**
+     * Get the exact timestamp to prune.
+     *
+     * @return \DateTime|null Returns the date that we should prune after.
+     */
+    private function getPruneDate() {
+        if (!$this->pruneAfter) {
+            return null;
+        } else {
+            $tz = new \DateTimeZone('UTC');
+            $now = new DateTime('now', $tz);
+            $test = new DateTime($this->pruneAfter, $tz);
+
+            $interval = $test->diff($now);
+
+            if ($interval->invert === 1) {
+                return $now->add($interval);
+            } else {
+                return $test;
+            }
+        }
+    }
+
+    /**
+     * Set the prune after date.
+     *
+     * @param string $pruneAfter A string compatible with {@link strtotime()}. Be sure to specify a negative string.
+     * @return ActivityModel Returns `$this` for fluent calls.
+     */
+    public function setPruneAfter($pruneAfter) {
+        if ($pruneAfter) {
+            // Make sure the string is negative.
+            $now = time();
+            $testTime = strtotime($pruneAfter, $now);
+            if ($testTime === false) {
+                throw new InvalidArgumentException('Invalid timespan value for "prune after".', 400);
+            }
+        }
+
+        $this->pruneAfter = $pruneAfter;
+        return $this;
+    }
+
+    /**
+     * Prune old activities.
+     */
+    private function prune() {
+        $date = $this->getPruneDate();
+
+        $this->SQL->delete(
+            'Activity',
+            ['DateUpdated <' => Gdn_Format::toDateTime($date->getTimestamp())],
+            10
+        );
+    }
+
+    /**
+     * Queue up an activity email notification.
+     *
+     * @param array $activity
+     * @param array $options
+     */
+    private function queueEmail(array $activity, array $options = []) {
+        $activityID = $activity["ActivityID"] ?? null;
+        $notifyUserID = $activity["NotifyUserID"] ?? null;
+        if (filter_var($activityID, FILTER_VALIDATE_INT) === false || filter_var($notifyUserID, FILTER_VALIDATE_INT) === false) {
+            return;
+        }
+
+        $user = $this->userModel->getID($notifyUserID, DATASET_TYPE_ARRAY);
+        if (!is_array($user) || !array_key_exists("Email", $user)) {
+            return;
+        }
+
+        if (!array_key_exists("Banned", $user) || $user["Banned"]) {
+            return;
+        }
+
+        $address = $user["Email"] ?? null;
+        if (!is_string($address) || empty($address)) {
+            return;
+        }
+
+        $decodedData = false;
+        if (array_key_exists("Data", $activity) && is_string($activity["Data"])) {
+            $activity["Data"] = dbdecode($activity["Data"]);
+            $decodedData = true;
+        }
+        $activity["Headline"] = $this->getActivityHeadline($activity, $user);
+        $subject = $this->getEmailSubjectFormatted($activity, $options);
+        $body = $this->getEmailMessage($activity);
+        $key = implode(".", [
+            $activity["ActivityTypeID"] ?? "",
+            $activity["RecordID"] ?? "",
+            $activity["RecordType"] ?? "",
+            md5($subject),
+            md5($body),
+        ]);
+        if ($decodedData === true && array_key_exists("Data", $activity) && is_array($activity["Data"])) {
+            $activity["Data"] = dbencode($activity["Data"]);
+        }
+
+        if (!array_key_exists($key, static::$emailQueue) || !(static::$emailQueue[$key] instanceof ActivityEmail)) {
+
+            $activityEmail = new ActivityEmail();
+            $activityEmail->setBody($body);
+            $activityEmail->setSubject($subject);
+            $activityEmail->setTitle($this->getEmailSubject($activity, []));
+            $activityEmail->setActionText($activity["ActionText"] ?? t("Check it out"));
+            $activityEmail->setActivityTypeID($activity["ActivityTypeID"] ?? null);
+            $activityEmail->setInternalRoute($activity["Route"] ?? "");
+            $activityEmail->setRecordID($activity["RecordID"] ?? null);
+            $activityEmail->setRecordType($activity["RecordType"] ?? null);
+            static::$emailQueue[$key] = $activityEmail;
+        } else {
+            $activityEmail = &static::$emailQueue[$key];
+        }
+
+        $activityEmail->addActivityID($activityID);
+        $activityEmail->addRecipient($address, $user["Name"] ?? null);
+    }
+
+    /**
+     * Send any queued emails.
+     */
+    private function sendEmailQueue() {
+        foreach (static::$emailQueue as $activityEmail) {
+            try {
+                $this->sendActivityEmail($activityEmail);
+            } catch (Exception $e) {
+                $this->logger->error("An exception occurred while processing the notification email queue.", [
+                    "event" => "activity_email_failed",
+                    "exception" => $e,
+                ]);
+            }
+        }
+        static::$emailQueue = [];
+    }
+
+    /**
+     * Invoke send on an instance of Gdn_Email and return its status.
+     *
+     * @param Gdn_Email $email
+     * @return integer
+     */
+    public function sendEmail(Gdn_Email $email): int {
+        // Send the email.
+        try {
+            $email->send();
+            return self::SENT_OK;
+        } catch (\PHPMailer\PHPMailer\Exception $pex) {
+            $this->logger->error("A PHPMailer exception occurred while sending a notification.", [
+                "event" => "activity_email_failed",
+                "exception" => $pex,
+            ]);
+            if ($pex->getCode() == PHPMailer::STOP_CRITICAL && !$email->PhpMailer->isServerError($pex)) {
+                return self::SENT_FAIL;
+            } else {
+                return self::SENT_ERROR;
+            }
+        } catch (Exception $ex) {
+            $this->logger->error("An exception occurred while sending a notification.", [
+                "event" => "activity_email_failed",
+                "exception" => $ex,
+            ]);
+            switch ($ex->getCode()) {
+                case Gdn_Email::ERR_SKIPPED:
+                    return self::SENT_SKIPPED;
+                default:
+                    return self::SENT_FAIL; // similar to http 5xx
+            }
+        }
+    }
+
+    /**
+     * Given an ActivityEmail instance, create and send the email it represents.
+     *
+     * @param ActivityEmail $activityEmail
+     */
+    private function sendActivityEmail(ActivityEmail $activityEmail) {
+        $batchSize = c("Garden.Email.BatchSize", 50);
+        $email = new Gdn_Email();
+        $recipients = $activityEmail->getRecipients();
+
+        $activityType = static::getActivityType($activityEmail->getActivityTypeID());
+        $route = $activityEmail->getInternalRoute() ?? "/";
+        $notification = [
+            "Activity" => [
+                "ActivityType" => $activityType["Name"] ?? null,
+                "RecordID" => $activityEmail->getRecordID(),
+                "RecordType" => $activityEmail->getRecordType(),
+                "Route" => $route,
+            ],
+            "Email" => $email,
+            "Route" => $route,
+            "UserAuthorized" => true, // Let anything hooking in know we've already authorized user access to the resources.
+        ];
+
+        $batchOffset = 0;
+        while ($batch = array_slice($recipients, $batchOffset, $batchSize)) {
+            $email->subject($activityEmail->getSubject());
+            $email->to($email->getNoReplyAddress(), t("Notifications Postmaster"));
+
+            foreach ($batch as $recipient) {
+                [$address, $name] = $recipient;
+                $email->bcc($address, $name ?? "");
+            }
+
+            $actionUrl = externalUrl($route);
+            $emailTemplate = $email->getEmailTemplate()
+                ->setButton($actionUrl, $activityEmail->getActionText())
+                ->setTitle($activityEmail->getTitle());
+            if ($message = $activityEmail->getBody()) {
+                $emailTemplate->setMessage($message, true);
+            }
+            $email->setEmailTemplate($emailTemplate);
+
+            $this->EventArguments = $notification;
+            $this->fireEvent("BeforeSendNotification");
+            $this->sendEmail($email);
+
+            $email->clear();
+            $batchOffset += $batchSize;
+        }
+    }
+
+    /**
+     * Generate a notification event object, based on a database row.
+     *
+     * @param array $row
+     * @param string $action
+     * @return NotificationEvent|null
+     */
+    private function notificationEventFromRow(array $row, string $action): ?NotificationEvent {
+        $notifyUserID = $row["NotifyUserID"] ?? 0;
+        if ($notifyUserID && $notifyUserID < 1) {
+            return null;
+        }
+
+        $notifyUser = $this->userModel->getID($notifyUserID, DATASET_TYPE_ARRAY);
+        if (!is_array($notifyUser)) {
+            return null;
+        }
+
+        $this->calculateRow($row);
+        $notification = $this->normalizeNotificationRow($row);
+
+        $notifyUser = $this->userModel->normalizeRow($notifyUser);
+        $notification["notifyUsers"] = [$notifyUser];
+        $notification = $this->notificationSchema()->validate($notification);
+
+        // Pre-fetch user authentication rows for caching.
+        $notifyUserIDs = array_column($notification["notifyUsers"], "userID");
+        $this->userModel->getDefaultSSOIDs($notifyUserIDs);
+
+        foreach ($notification["notifyUsers"] as &$currentUser) {
+            $currentUser = $this->addUserFragmentFields($currentUser);
+        }
+
+        $result = new NotificationEvent(
+            $action,
+            ["notification" => $notification]
+        );
+
+        return $result;
+    }
+
+    /**
+     * Given a user fragment, augment it with helpful fields related to user notifications (e.g. email, SSO IDs).
+     *
+     * @param array $userFragment
+     * @return array
+     */
+    private function addUserFragmentFields(array $userFragment): array {
+        $userID = $userFragment["userID"] ?? null;
+
+        if ($userID > 0) {
+            $user = $this->userModel->getID($userID, DATASET_TYPE_ARRAY);
+            $ssoID = $this->userModel->getDefaultSSOIDs([$userID]);
+
+            $userFragment["email"] = $user["Email"] ?? null;
+            $userFragment["ssoID"] = $ssoID[$userID] ?? null;
+        } else {
+            $userFragment["email"] = null;
+            $userFragment["ssoID"] = null;
+        }
+
+        return $userFragment;
+    }
+
+    /**
+     * Given a database row, massage the data into a more externally-useful format.
+     *
+     * @param array $row
+     * @return array
+     */
+    public function normalizeNotificationRow(array $row): array {
+        $row["notificationID"] = $row["ActivityID"];
+        $row["photoUrl"] = $row["Photo"];
+        $row["read"] = $row["Notified"] === ActivityModel::SENT_OK;
+        $row["activityName"] = $row["ActivityName"];
+
+        $body = formatString($row["Headline"], $row);
+        // Replace anchors with bold text until notifications can be spun off from activities.
+        $row["body"] = preg_replace("#<a [^>]+>(.+)</a>#Ui", "<strong>$1</strong>", $body);
+
+        $scheme = new CamelCaseScheme();
+        $result = $scheme->convertArrayKeys($row);
+        return $result;
+    }
+
+    /**
+     * Get a schema instance comprised of standard activity fields.
+     *
+     * @return Schema
+     */
+    public function notificationSchema(): Schema {
+        $result = Schema::parse([
+            "notificationID" => ["type" => "integer"],
+            "notifyUsers?" => [
+                "items" => new UserFragmentSchema(),
+                "type" => "array",
+            ],
+            "body" => ["type" => "string"],
+            "photoUrl" => [
+                "allowNull" => true,
+                "type" => "string",
+            ],
+            "activityName?" => ["type" => "string"],
+            "url" => ["type" => "string"],
+            "dateInserted" => ["type" => "datetime"],
+            "dateUpdated" => ["type" => "datetime"],
+            "read" => ["type" => "boolean"],
+        ]);
+
+        return $result;
+    }
 }

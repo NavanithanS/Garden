@@ -1,447 +1,697 @@
-<?php if (!defined('APPLICATION')) exit();
-
+<?php
 /**
  * Database manager
  *
- * The Database object contains connection and engine information for a single database.
- * It also allows a database to execute string sql statements against that database.
- *
  * @author Todd Burry <todd@vanillaforums.com>
- * @copyright 2003 Vanilla Forums, Inc
- * @license http://www.opensource.org/licenses/gpl-2.0.php GPL
- * @package Garden
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
+ * @package Core
  * @since 2.0
  */
 
+/**
+ * The Database object contains connection and engine information for a single database.
+ *
+ * It also allows a database to execute string sql statements against that database.
+ */
 class Gdn_Database {
-   /// CONSTRUCTOR ///
 
-   /** @param mixed $Config The configuration settings for this object.
-    *  @see Database::Init()
-    */
-   public function __construct($Config = NULL) {
-      $this->ClassName = get_class($this);
-      $this->Init($Config);
-   }
+    /** @var string The instance name of this class or the class that inherits from this class. */
+    public $ClassName;
 
-   /// PROPERTIES ///
+    /** @var object */
+    private $_CurrentResultSet;
 
-   /** @var string The instance name of this class or the class that inherits from this class. */
-   public $ClassName;
+    /** @var PDO The connection to the database. */
+    protected $_Connection = null;
 
-   private $_CurrentResultSet;
+    /** @var bool */
+    protected $_IsPersistent = false;
 
-   /** @var PDO The connectio to the database. */
-   protected $_Connection = NULL;
+    /** @var PDO The connection to the slave database. */
+    protected $_Slave = null;
 
-   protected $_IsPersistent = FALSE;
+    /** @var array The slave connection settings. */
+    protected $_SlaveConfig = null;
 
-   /** @var PDO The connection to the slave database. */
-   protected $_Slave = NULL;
+    /** @var string|null */
+    protected $_SQL = null;
 
-   /** @var array The slave connection settings. */
-   protected $_SlaveConfig = NULL;
+    /** @var array|null */
+    protected $_Structure = null;
 
-   protected $_SQL = NULL;
+    /** @var array The connection options passed to the PDO constructor. */
+    public $ConnectionOptions;
 
-   protected $_Structure = NULL;
+    /** @var string The prefix to all database tables. */
+    public $DatabasePrefix;
 
-   /** @var array The connection options passed to the PDO constructor **/
-   public $ConnectionOptions;
+    /** @var array Extented properties that a specific driver can use. */
+    public $ExtendedProperties;
 
-   /** @var string The prefix to all database tables. */
-   public $DatabasePrefix;
+    /** $var bool Whether or not the connection is in a transaction. **/
+    protected $_InTransaction = false;
 
-   /** @var array Extented properties that a specific driver can use. **/
-   public $ExtendedProperties;
+    /** @var string The PDO dsn for the database connection. Note: This does NOT include the engine before the DSN. */
+    public $Dsn;
 
-   /** $var bool Whether or not the connection is in a transaction. **/
-   protected $_InTransaction = FALSE;
+    /** @var string The name of the database engine for this class. */
+    public $Engine;
 
-   /** @var string The PDO dsn for the database connection.
-    *  Note: This does NOT include the engine before the dsn.
-    */
-   public $Dsn;
+    /** @var array Information about the last query. */
+    public $LastInfo = [];
 
-   /** @var string The name of the database engine for this class. */
-   public $Engine;
+    /** @var string The password to the database. */
+    public $Password;
 
-   /**
-    * @var array Information about the last query.
-    */
-   public $LastInfo = array();
+    /** @var string The username connecting to the database. */
+    public $User;
 
-   /** @var string The password to the database. */
-   public $Password;
+    /** @var int Number of retries when the db has gone away. */
+    public $ConnectRetries;
 
-   /** @var string The username connecting to the database. */
-   public $User;
+    /** @var int Number of milliseconds we are willing to wait to make a successful connection to the DB */
+    protected $SmoothTimeoutMillis;
 
-   /// METHODS ///
+    /** @var int Minimum number of milliseconds we want to wait before attempting a new DB connection*/
+    protected $SmoothWaitMinMillis;
 
-   /**
-    * Begin a transaction on the database.
-    */
-   public function BeginTransaction() {
-      if (!$this->_InTransaction)
-         $this->_InTransaction = $this->Connection()->beginTransaction();
-   }
+    /** @var int Maximum number of milliseconds we want to wait before attempting a new DB connection*/
+    protected $SmoothWaitMaxMillis;
 
-   /** Get the PDO connection to the database.
-    * @return PDO The connection to the database.
-    */
-   public function Connection() {
-      $this->_IsPersistent = val(PDO::ATTR_PERSISTENT, $this->ConnectionOptions, FALSE);
-      if($this->_Connection === NULL) {
-         $this->_Connection = $this->NewPDO($this->Dsn, $this->User, $this->Password);
-      }
+    /**
+     * @var \Vanilla\Utility\Timers
+     */
+    private $timers;
 
-      return $this->_Connection;
-   }
+    /**
+     * Gdn_Database constructor.
+     *
+     * @param array|string|null $config The configuration settings for this object.
+     * @see Database::init()
+     */
+    public function __construct($config = null) {
+        $this->ClassName = get_class($this);
+        $this->init($config);
+        $this->ConnectRetries = 1;
+        $this->timers = Gdn::getContainer()->get(\Vanilla\Utility\Timers::class);
+    }
 
-   public function CloseConnection() {
-      if (!$this->_IsPersistent) {
-         $this->CommitTransaction();
-         $this->_Connection = NULL;
-      }
-   }
+    /**
+     * Begin a transaction on the database.
+     */
+    public function beginTransaction() {
+        if (!$this->_InTransaction) {
+            $this->_InTransaction = $this->connection()->beginTransaction();
+        }
+    }
 
-   /**
-    * Hook for cleanup via Gdn_Factory
-    *
-    */
-   public function Cleanup() {
-      $this->CloseConnection();
-   }
+    /**
+     * Get the PDO connection to the database.
+     *
+     * @return PDO The connection to the database.
+     */
+    public function connection() {
+        $this->_IsPersistent = val(PDO::ATTR_PERSISTENT, $this->ConnectionOptions, false);
+        if ($this->_Connection === null) {
+            $this->_Connection = $this->newPDO($this->Dsn, $this->User, $this->Password);
+        }
 
-   /**
-    * Commit a transaction on the database.
-    */
-   public function CommitTransaction() {
-      if ($this->_InTransaction)
-         $this->_InTransaction = !$this->Connection()->commit();
-   }
+        return $this->_Connection;
+    }
 
-   protected function NewPDO($Dsn, $User, $Password) {
-      try {
-         $PDO = new PDO(strtolower($this->Engine).':'.$Dsn, $User, $Password, $this->ConnectionOptions);
-         $PDO->setAttribute(PDO::ATTR_EMULATE_PREPARES, 0);
+    /**
+     * Close the connection to the database.
+     */
+    public function closeConnection() {
+        if (!$this->_IsPersistent) {
+            $this->commitTransaction();
+            $this->_Connection = null;
+            $this->_Slave = null;
+        }
+    }
 
-         if($this->ConnectionOptions[1002])
-            $PDO->query($this->ConnectionOptions[1002]);
+    /**
+     * Close connection regardless of persistence.
+     */
+    public function forceCloseConnection() {
+        $this->_Connection = null;
+    }
 
-         // We only throw exceptions during connect
-         $PDO->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_SILENT);
-      } catch (Exception $ex) {
-         $Timeout = FALSE;
-         if ($ex->getCode() == '2002' && preg_match('/Operation timed out/i', $ex->getMessage()))
-            $Timeout = TRUE;
-         if ($ex->getCode() == '2003' && preg_match("/Can't connect to MySQL/i", $ex->getMessage()))
-            $Timeout = TRUE;
+    /**
+     * Hook for cleanup via Gdn_Factory.
+     */
+    public function cleanup() {
+        $this->closeConnection();
+    }
 
-         if ($Timeout)
-            throw new Exception(ErrorMessage('Timeout while connecting to the database', $this->ClassName, 'Connection', $ex->getMessage()), 504);
+    /**
+     * Commit a transaction on the database.
+     */
+    public function commitTransaction() {
+        if ($this->_InTransaction) {
+            $this->_InTransaction = !$this->connection()->commit();
+        }
+    }
 
-         trigger_error(ErrorMessage('An error occurred while attempting to connect to the database', $this->ClassName, 'Connection', $ex->getMessage()), E_USER_ERROR);
-      }
+    /**
+     * Creates a new PDO object.
+     *
+     * Supports connection smoothness. In the case that the connection cannot be done because a resources limit is reached
+     * (max connections, max user connections, user limits) we loop up to `SmoothTimeoutMillis` milliseconds and we retry
+     * the connection.
+     * Every try sleeps for a random amount of time between SmoothWaitMinMillis & SmoothWaitMaxMillis and then attempts a
+     * new connection.
+     * `$timeoutAt` holds the timestamps at which no more retries are done. It's static as it's a fixed amount of time
+     * we are willing to wait during the whole request processing time (Otherwise, waiting time could be accumulative in cases)
+     *
+     * Beware that in the theoretical "worst" case scenario we wait for up to (SmoothTimeoutMillis +  SmoothWaitMaxMillis - 1),
+     * 5749ms for the defaults values.
+     *
+     * @param string $dsn
+     * @param string $user
+     * @param string $password
+     * @return PDO
+     * @throws Exception Throws an exception if there is an error connecting to the database.
+     */
+    protected function newPDO($dsn, $user, $password) {
+        static $timeoutAt = null;
+        $timeoutAt = $timeoutAt ?? microtime(true) + ($this->SmoothTimeoutMillis / 1000);
+        do {
+            try {
+                $pDO = new PDO(strtolower($this->Engine).':'.$dsn, $user, $password, $this->ConnectionOptions);
+                $pDO->setAttribute(PDO::ATTR_EMULATE_PREPARES, 0);
+                $pDO->query("set time_zone = '+0:0'");
 
-      return $PDO;
-   }
+                // We only throw exceptions during connect
+                $pDO->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_SILENT);
 
-   /**
-	 * Properly quotes and escapes a expression for an sql string.
-	 * @param mixed $Expr The expression to quote.
-	 * @return string The quoted expression.
-	 */
-	public function QuoteExpression($Expr) {
-		if(is_null($Expr)) {
-			return 'NULL';
-		} elseif(is_string($Expr)) {
-			return '\''.str_replace('\'', '\\\'', $Expr).'\'';
-		} elseif(is_object($Expr)) {
-			return '?OBJECT?';
-		} else {
-			return $Expr;
-		}
-	}
+                return $pDO;
+            } catch (Exception $ex) {
+                if ($ex instanceof PDOException &&
+                    microtime(true) < $timeoutAt &&
+                    in_array($ex->getCode(), [1203, 1040, 1226])
+                ) {
+                    /*
+                     * https://dev.mysql.com/doc/refman/5.7/en/server-error-reference.html
+                     * ---
+                     * Error number: 1203; Symbol: ER_TOO_MANY_USER_CONNECTIONS; SQLSTATE: 42000
+                     * Message: User %s already has more than 'max_user_connections' active connections
+                     * ---
+                     * Error number: 1040; Symbol: ER_CON_COUNT_ERROR; SQLSTATE: 08004
+                     * Message: Too many connections
+                     * ---
+                     * Error number: 1226; Symbol: ER_USER_LIMIT_REACHED; SQLSTATE: 42000
+                     * Message: User '%s' has exceeded the '%s' resource (current value: %ld)
+                     * ---
+                     * In case connection limit is reached, we wait a random amount of time hoping the connection is released
+                     */
+                    usleep(rand($this->SmoothWaitMinMillis, $this->SmoothWaitMaxMillis) * 1000);
+                } else {
+                    $timeout = false;
+                    if ($ex->getCode() == '2002' && preg_match('/Operation timed out/i', $ex->getMessage())) {
+                        $timeout = true;
+                    }
+                    if ($ex->getCode() == '2003' && preg_match("/Can't connect to MySQL/i", $ex->getMessage())) {
+                        $timeout = true;
+                    }
 
-   /**
-    * Initialize the properties of this object.
-    * @param mixed $Config The database is instantiated differently depending on the type of $Config:
-    * - <b>null</b>: The database stored in the factory location Gdn:AliasDatabase will be used.
-    * - <b>string</b>: The name of the configuration section to get the connection information from.
-    * - <b>array</b>: The database properties will be set from the array. The following items can be in the array:
-    *   - <b>Engine</b>: Required. The name of the database engine (MySQL, pgsql, sqlite, odbc, etc.
-    *   - <b>Dsn</b>: Optional. The dsn for the connection. If the dsn is not supplied then the connectio information below must be supplied.
-    *   - <b>Host, Dbname</b>: Optional. The individual database connection options that will be build into a dsn.
-    *   - <b>User</b>: The username to connect to the datbase.
-    *   - <b>Password</b>: The password to connect to the database.
-    *   - <b>ConnectionOptions</b>: Other PDO connection attributes.
-    */
-   public function Init($Config = NULL) {
-      if(is_null($Config))
-         $Config = Gdn::Config('Database');
-      elseif(is_string($Config))
-         $Config = Gdn::Config($Config);
+                    if ($timeout) {
+                        throw new Exception('Timeout while connecting to the database.', 504);
+                    }
 
-      $DefaultConfig = Gdn::Config('Database');
-      if (is_null($Config))
-         $Config = array();
-      if (is_null($DefaultConfig))
-         $DefaultConfig = array();
-
-      // Make sure DefaultConfig has all the keys we need
-      $DefaultConfig = array_merge(array(
-         'Engine'             => null,
-         'Host'               => '',
-         'User'               => null,
-         'Password'           => null,
-         'ConnectionOptions'  => null,
-         'DatabasePrefix'     => null,
-         'Prefix'             => null
-      ), $DefaultConfig);
-
-      $Config = array_merge($DefaultConfig, $Config);
-
-      $this->Engine = val('Engine', $Config);
-      $this->User = val('User', $Config);
-      $this->Password = val('Password', $Config);
-      $this->ConnectionOptions = val('ConnectionOptions', $Config);
-      $this->DatabasePrefix = val('DatabasePrefix', $Config, val('Prefix', $Config));
-      $this->ExtendedProperties = val('ExtendedProperties', $Config, array());
-
-      if (array_key_exists('Dsn', $Config)) {
-         // Get the dsn from the property.
-         $Dsn = $Config['Dsn'];
-      } else {
-         $Host = val('Host', $Config);
-         if(array_key_exists('Dbname', $Config))
-            $Dbname = $Config['Dbname'];
-         elseif(array_key_exists('Name', $Config))
-            $Dbname = $Config['Name'];
-         elseif(array_key_exists('Dbname', $DefaultConfig))
-            $Dbname = $DefaultConfig['Dbname'];
-         elseif(array_key_exists('Name', $DefaultConfig))
-            $Dbname = $DefaultConfig['Name'];
-         // Was the port explicitly defined in the config?
-         $Port = val('Port', $Config, val('Port', $DefaultConfig, ''));
-
-         if(!isset($Dbname)) {
-            $Dsn = val('Dsn', $DefaultConfig);
-         } else {
-            if(empty($Port)) {
-               // Was the port explicitly defined with the host name? (ie. 127.0.0.1:3306)
-               $Host = explode(':', $Host);
-               $Port = count($Host) == 2 ? $Host[1] : '';
-               $Host = $Host[0];
+                    throw new Exception(
+                        "An error occurred while attempting to connect to the database. dsn: $dsn, error: ".$dsn.$ex->getMessage(),
+                        500
+                    );
+                }
             }
+        } while (true);
+    }
 
-            if(empty($Port)) {
-               $Dsn = sprintf('host=%s;dbname=%s;', $Host, $Dbname);
+    /**
+     * Properly quotes and escapes a expression for a SQL string.
+     *
+     * @param mixed $expr The expression to quote.
+     * @return string The quoted expression.
+     */
+    public function quoteExpression($expr) {
+        if (is_null($expr)) {
+            return 'NULL';
+        } elseif (is_string($expr)) {
+            return '\''.str_replace('\'', '\\\'', $expr).'\'';
+        } elseif (is_object($expr)) {
+            return '?OBJECT?';
+        } else {
+            return $expr;
+        }
+    }
+
+    /**
+     * Initialize the properties of this object.
+     *
+     * @param mixed $config The database is instantiated differently depending on the type of $Config:
+     * - <b>null</b>: The database stored in the factory location Gdn:AliasDatabase will be used.
+     * - <b>string</b>: The name of the configuration section to get the connection information from.
+     * - <b>array</b>: The database properties will be set from the array. The following items can be in the array:
+     *   - <b>Engine</b>: Required. The name of the database engine (MySQL, pgsql, sqlite, odbc, etc.
+     *   - <b>Dsn</b>: Optional. The dsn for the connection. If the dsn is not supplied then the connectio information below must be supplied.
+     *   - <b>Host, Dbname</b>: Optional. The individual database connection options that will be build into a dsn.
+     *   - <b>User</b>: The username to connect to the database.
+     *   - <b>Password</b>: The password to connect to the database.
+     *   - <b>ConnectionOptions</b>: Other PDO connection attributes.
+     */
+    public function init($config = null) {
+        if (is_null($config)) {
+            $config = Gdn::config('Database');
+        } elseif (is_string($config)) {
+            $config = Gdn::config($config);
+        }
+
+        $defaultConfig = (array)Gdn::config('Database', []);
+        if (is_null($config)) {
+            $config = [];
+        }
+
+        if (is_null($defaultConfig)) {
+            $defaultConfig = [];
+        }
+
+        // Make sure the config has all the keys we need
+        $config += $defaultConfig + [
+            'Dsn' => null,
+            'Engine' => null,
+            'Host' => '',
+            'Dbname' => '',
+            'Name' => '',
+            'Port' => null,
+            'User' => null,
+            'Password' => null,
+            'ConnectionOptions' => null,
+            'ExtendedProperties' => [],
+            'DatabasePrefix' => null,
+            'Prefix' => null,
+            'SmoothTimeoutMillis' => 5000,
+            'SmoothWaitMinMillis' => 250,
+            'SmoothWaitMaxMillis' => 750,
+        ];
+
+        $this->Engine = $config['Engine'];
+        $this->User = $config['User'];
+        $this->Password = $config['Password'];
+        $this->ConnectionOptions = $config['ConnectionOptions'];
+        $this->DatabasePrefix = $config['DatabasePrefix'] ?: $config['Prefix'];
+        $this->ExtendedProperties = $config['ExtendedProperties'];
+        $this->SmoothTimeoutMillis = $config['SmoothTimeoutMillis'];
+        $this->SmoothWaitMinMillis = $config['SmoothWaitMinMillis'];
+        $this->SmoothWaitMaxMillis = $config['SmoothWaitMaxMillis'];
+
+        if (!empty($config['Dsn'])) {
+            // Get the dsn from the property.
+            $dsn = $config['Dsn'];
+        } else {
+            $host = $config['Host'];
+            $dbname = $config['Dbname'] ?: $config['Name'];
+
+            if (empty($dbname)) {
+                $dsn = '';
             } else {
-               $Dsn = sprintf('host=%s;port=%s;dbname=%s;', $Host, $Port, $Dbname);
+                // Was the port explicitly defined in the config?
+                $port = $config['Port'];
+                if (empty($port) && strpos($host, ':') !== false) {
+                    // Was the port explicitly defined with the host name? (ie. 127.0.0.1:3306)
+                    list($host, $port) = explode(':', $host);
+                }
+
+                if (empty($port)) {
+                    $dsn = sprintf('host=%s;dbname=%s;', $host, $dbname);
+                } else {
+                    $dsn = sprintf('host=%s;port=%s;dbname=%s;', $host, $port, $dbname);
+                }
             }
-         }
-      }
+        }
+        if (strpos($dsn, 'charset=') === false) {
+            $dsn .= rtrim($dsn, ';').';charset='.c('Database.CharacterEncoding', 'utf8mb4');
+        }
 
-      if (array_key_exists('Slave', $Config)) {
-         $this->_SlaveConfig = $Config['Slave'];
-      }
+        if (array_key_exists('Slave', $config)) {
+            $this->_SlaveConfig = $config['Slave'];
+        }
 
-      $this->Dsn = $Dsn;
-   }
+        $this->Dsn = $dsn;
+    }
 
-   /**
-    * Executes a string of SQL. Returns a @@DataSet object.
-    *
-    * @param string $Sql A string of SQL to be executed.
-    * @param array $InputParameters An array of values with as many elements as there are bound parameters in the SQL statement being executed.
-    */
-   public function Query($Sql, $InputParameters = NULL, $Options = array()) {
-      $this->LastInfo = array();
+    /**
+     * Executes a string of SQL. Returns a @@DataSet object.
+     *
+     * @param string $sql A string of SQL to be executed.
+     * @param array $inputParameters An array of values with as many elements as there are bound parameters in the SQL statement being executed.
+     * @param array $options
+     * @return mixed
+     */
+    public function query($sql, $inputParameters = null, $options = []) {
+        $this->LastInfo = [];
 
-      if ($Sql == '')
-         trigger_error(ErrorMessage('Database was queried with an empty string.', $this->ClassName, 'Query'), E_USER_ERROR);
+        if ($sql == '') {
+            trigger_error(errorMessage('Database was queried with an empty string.', $this->ClassName, 'Query'), E_USER_ERROR);
+        }
 
-      // Get the return type.
-      if (isset($Options['ReturnType']))
-         $ReturnType = $Options['ReturnType'];
-      elseif (preg_match('/^\s*"?(insert)\s+/i', $Sql))
-         $ReturnType = 'ID';
-      elseif (!preg_match('/^\s*"?(update|delete|replace|create|drop|load data|copy|alter|grant|revoke|lock|unlock)\s+/i', $Sql))
-         $ReturnType = 'DataSet';
-      else
-         $ReturnType = NULL;
+        // Get the return type.
+        if (isset($options['ReturnType'])) {
+            $returnType = $options['ReturnType'];
+        } elseif (preg_match('/^\s*"?(insert)\s+/i', $sql)) {
+            $returnType = 'ID';
+        } elseif (!preg_match('/^\s*"?(update|delete|replace|create|drop|load data|copy|alter|grant|revoke|lock|unlock)\s+/i', $sql)) {
+            $returnType = 'DataSet';
+        } else {
+            $returnType = null;
+        }
 
-		if (isset($Options['Cache'])) {
-         // Check to see if the query is cached.
-         $CacheKeys = (array)val('Cache',$Options,NULL);
-         $CacheOperation = val('CacheOperation',$Options,NULL);
-         if (is_null($CacheOperation)) {
-            switch ($ReturnType) {
-               case 'DataSet':
-                  $CacheOperation = 'get';
-                  break;
-               case 'ID':
-               case NULL:
-                  $CacheOperation = 'remove';
-                  break;
+        try {
+            $timerName = $returnType === 'DataSet' ? 'dbRead' : 'dbWrite';
+            $this->timers->start(['db', $timerName]);
+
+            if (isset($options['Cache'])) {
+                // Check to see if the query is cached.
+                $cacheKeys = (array)val('Cache', $options, null);
+                $cacheOperation = val('CacheOperation', $options, null);
+                if (is_null($cacheOperation)) {
+                    switch ($returnType) {
+                        case 'DataSet':
+                            $cacheOperation = 'get';
+                            break;
+                        case 'ID':
+                        case null:
+                            $cacheOperation = 'remove';
+                            break;
+                    }
+                }
+
+                switch ($cacheOperation) {
+                    case 'get':
+                        foreach ($cacheKeys as $cacheKey) {
+                            $data = Gdn::cache()->get($cacheKey);
+                        }
+
+                        // Cache hit. Return.
+                        if ($data !== Gdn_Cache::CACHEOP_FAILURE) {
+                            return new Gdn_DataSet($data);
+                        }
+
+                        // Cache miss. Save later.
+                        $storeCacheKey = $cacheKey;
+                        break;
+
+                    case 'increment':
+                    case 'decrement':
+                        $cacheMethod = ucfirst($cacheOperation);
+                        foreach ($cacheKeys as $cacheKey) {
+                            $cacheResult = Gdn::cache()->$cacheMethod($cacheKey);
+                        }
+                        break;
+
+                    case 'remove':
+                        foreach ($cacheKeys as $cacheKey) {
+                            $res = Gdn::cache()->remove($cacheKey);
+                        }
+                        break;
+                }
             }
-         }
 
-         switch ($CacheOperation) {
-            case 'get':
-               foreach ($CacheKeys as $CacheKey) {
-                  $Data = Gdn::Cache()->Get($CacheKey);
-               }
+            // We will retry this query a few times if it fails.
+            $tries = $this->ConnectRetries + 1;
+            if ($tries < 1) {
+                $tries = 1;
+            }
 
-               // Cache hit. Return.
-               if ($Data !== Gdn_Cache::CACHEOP_FAILURE)
-                  return new Gdn_DataSet($Data);
+            if (val('Type', $options) == 'select' && val('Slave', $options, null) !== false) {
+                $pDO = $this->slave();
+                $this->LastInfo['connection'] = 'slave';
+            } else {
+                $pDO = $this->connection();
+                $this->LastInfo['connection'] = 'master';
+            }
 
-               // Cache miss. Save later.
-               $StoreCacheKey = $CacheKey;
-               break;
+            for ($try = 0; $try < $tries; $try++) {
+                // Make sure other unbufferred queries are not open
+                if (is_object($this->_CurrentResultSet)) {
+                    $this->_CurrentResultSet->result();
+                    $this->_CurrentResultSet->freePDOStatement(false);
+                }
 
-            case 'increment':
-            case 'decrement':
-               $CacheMethod = ucfirst($CacheOperation);
-               foreach ($CacheKeys as $CacheKey) {
-                  $CacheResult = Gdn::Cache()->$CacheMethod($CacheKey);
-               }
-               break;
+                $pDOStatement = null;
+                try {
+                    // Prepare / Execute
+                    if (!is_null($inputParameters) && count($inputParameters) > 0) {
+                        $pDOStatement = $pDO->prepare($sql);
 
-            case 'remove':
-               foreach ($CacheKeys as $CacheKey) {
-                  $Res = Gdn::Cache()->Remove($CacheKey);
-               }
-               break;
-         }
-		}
+                        if (!is_object($pDOStatement)) {
+                            trigger_error(
+                                errorMessage('PDO Statement failed to prepare', $this->ClassName, 'Query', $this->getPDOErrorMessage($pDO->errorInfo())),
+                                E_USER_ERROR
+                            );
+                        } elseif ($pDOStatement->execute($inputParameters) === false) {
+                            trigger_error(
+                                errorMessage($this->getPDOErrorMessage($pDOStatement->errorInfo()), $this->ClassName, 'Query', $sql),
+                                E_USER_ERROR
+                            );
+                        }
+                    } else {
+                        $pDOStatement = $pDO->query($sql);
+                    }
 
-      if (val('Type', $Options) == 'select' && val('Slave', $Options, NULL) !== FALSE) {
-         $PDO = $this->Slave();
-         $this->LastInfo['connection'] = 'slave';
-      } else {
-         $PDO = $this->Connection();
-         $this->LastInfo['connection'] = 'master';
-      }
+                    if ($pDOStatement === false) {
+                        list($state, $code, $message) = $pDO->errorInfo();
 
-      // Make sure other unbufferred queries are not open
-      if (is_object($this->_CurrentResultSet)) {
-         $this->_CurrentResultSet->Result();
-         $this->_CurrentResultSet->FreePDOStatement(FALSE);
-      }
+                        // Detect mysql "server has gone away" and try to reconnect.
+                        if ($code == 2006 && $try < $tries) {
+                            $this->closeConnection();
+                            continue;
+                        } else {
+                            throw new Gdn_UserException($message, $code);
+                        }
+                    }
 
-      // Run the Query
-      if (!is_null($InputParameters) && count($InputParameters) > 0) {
-         $PDOStatement = $PDO->prepare($Sql);
+                    // If we get here then the pdo statement prepared properly.
+                    break;
+                } catch (Gdn_UserException $uex) {
+                    trigger_error($uex->getMessage(), E_USER_ERROR);
+                } catch (Exception $ex) {
+                    list($state, $code, $message) = $pDO->errorInfo();
 
-         if (!is_object($PDOStatement)) {
-            trigger_error(ErrorMessage('PDO Statement failed to prepare', $this->ClassName, 'Query', $this->GetPDOErrorMessage($PDO->errorInfo())), E_USER_ERROR);
-         } else if ($PDOStatement->execute($InputParameters) === FALSE) {
-            trigger_error(ErrorMessage($this->GetPDOErrorMessage($PDOStatement->errorInfo()), $this->ClassName, 'Query', $Sql), E_USER_ERROR);
-         }
-      } else {
-         $PDOStatement = $PDO->query($Sql);
-      }
+                    // If the error code is consistent with a disconnect, attempt to retry
+                    if ($code == 2006 && $try < $tries) {
+                        $this->closeConnection();
+                        continue;
+                    }
 
-      if ($PDOStatement === FALSE) {
-         trigger_error(ErrorMessage($this->GetPDOErrorMessage($PDO->errorInfo()), $this->ClassName, 'Query', $Sql), E_USER_ERROR);
-      }
+                    if (!$message) {
+                        $message = $ex->getMessage();
+                    }
 
-      // Did this query modify data in any way?
-      if ($ReturnType == 'ID') {
-         $this->_CurrentResultSet = $PDO->lastInsertId();
-         if (is_a($PDOStatement, 'PDOStatement')) {
-            $PDOStatement->closeCursor();
-         }
-      } else {
-         if ($ReturnType == 'DataSet') {
-            // Create a DataSet to manage the resultset
-            $this->_CurrentResultSet = new Gdn_DataSet();
-            $this->_CurrentResultSet->Connection = $PDO;
-            $this->_CurrentResultSet->PDOStatement($PDOStatement);
-         } elseif (is_a($PDOStatement, 'PDOStatement')) {
-            $PDOStatement->closeCursor();
-         }
-      }
+                    trigger_error($message, E_USER_ERROR);
+                }
+            }
 
-      if (isset($StoreCacheKey)) {
-         if ($CacheOperation == 'get')
-            Gdn::Cache()->Store(
-               $StoreCacheKey,
-               (($this->_CurrentResultSet instanceof Gdn_DataSet) ? $this->_CurrentResultSet->ResultArray() : $this->_CurrentResultSet),
-               val('CacheOptions', $Options, array())
-               );
-      }
+            if ($pDOStatement instanceof PDOStatement) {
+                $this->LastInfo['RowCount'] = $pDOStatement->rowCount();
+            }
 
-      return $this->_CurrentResultSet;
-   }
+            // Did this query modify data in any way?
+            if ($returnType === 'ID') {
+                $this->_CurrentResultSet = $pDO->lastInsertId();
+                if (is_a($pDOStatement, 'PDOStatement')) {
+                    $pDOStatement->closeCursor();
+                }
+            } else {
+                if ($returnType === 'DataSet') {
+                    // Create a DataSet to manage the resultset
+                    $this->_CurrentResultSet = new Gdn_DataSet();
+                    $this->_CurrentResultSet->Connection = $pDO;
+                    $this->_CurrentResultSet->pdoStatement($pDOStatement);
+                } elseif (is_a($pDOStatement, 'PDOStatement')) {
+                    $pDOStatement->closeCursor();
+                }
+            }
 
-   public function RollbackTransaction() {
-      if($this->_InTransaction) {
-         $this->_InTransaction = !$this->Connection()->rollBack();
-      }
-   }
-   public function GetPDOErrorMessage($ErrorInfo) {
-      $ErrorMessage = '';
-      if (is_array($ErrorInfo)) {
-         if (count($ErrorInfo) >= 2)
-            $ErrorMessage = $ErrorInfo[2];
-         elseif (count($ErrorInfo) >= 1)
-            $ErrorMessage = $ErrorInfo[0];
-      } elseif (is_string($ErrorInfo)) {
-         $ErrorMessage = $ErrorInfo;
-      }
+            if (isset($storeCacheKey)) {
+                if ($cacheOperation == 'get') {
+                    Gdn::cache()->store(
+                        $storeCacheKey,
+                        (($this->_CurrentResultSet instanceof Gdn_DataSet) ? $this->_CurrentResultSet->resultArray() : $this->_CurrentResultSet),
+                        val('CacheOptions', $options, [])
+                    );
+                }
+            }
 
-      return $ErrorMessage;
-   }
+            return $this->_CurrentResultSet;
+        } finally {
+            $this->timers->stop(['db', $timerName]);
+        }
+    }
 
-   /**
-    * The slave connection to the database.
-    * @return PDO
-    */
-   public function Slave() {
-      if ($this->_Slave === NULL) {
-         if (empty($this->_SlaveConfig)) {
-            $this->_Slave = $this->Connection();
-         } else {
-            $this->_Slave = $this->NewPDO($this->_SlaveConfig['Dsn'], $this->_SlaveConfig['User'], $this->_SlaveConfig['Password']);
-         }
-      }
+    /**
+     * Rollback the active transaction.
+     */
+    public function rollbackTransaction() {
+        if ($this->_InTransaction) {
+            $this->_InTransaction = !$this->connection()->rollBack();
+        }
+    }
 
-      return $this->_Slave;
-   }
+    /**
+     * Get the specific PDO error message.
+     *
+     * @param string|array $errorInfo
+     * @return string
+     */
+    public function getPDOErrorMessage($errorInfo) {
+        $errorMessage = '';
+        if (is_array($errorInfo)) {
+            if (count($errorInfo) >= 2) {
+                $errorMessage = $errorInfo[2];
+            } elseif (count($errorInfo) >= 1) {
+                $errorMessage = $errorInfo[0];
+            }
+        } elseif (is_string($errorInfo)) {
+            $errorMessage = $errorInfo;
+        }
 
-   /**
-    * Get the database driver class for the database.
-    * @return Gdn_SQLDriver The database driver class associated with this database.
-    */
-   public function SQL() {
-      if(is_null($this->_SQL)) {
-         $Name = $this->Engine . 'Driver';
-         $this->_SQL = Gdn::Factory($Name);
-         if (!$this->_SQL)
-            $this->_SQL = new stdClass();
-         $this->_SQL->Database = $this;
-      }
+        return $errorMessage;
+    }
 
-      return $this->_SQL;
-   }
+    /**
+     * Translate a database data type into a type compatible with Garden Schema.
+     *
+     * @param string $fieldType
+     * @return string
+     */
+    private function simpleDataType(string $fieldType): string {
+        $fieldType = strtolower($fieldType);
 
-   /**
-    * Get the database structure class for this database.
-    *
-    * @return Gdn_DatabaseStructure The database structure class for this database.
-    */
-   public function Structure() {
-      if(is_null($this->_Structure)) {
-         $Name = $this->Engine . 'Structure';
-         $this->_Structure = Gdn::Factory($Name);
-         $this->_Structure->Database = $this;
-      }
+        switch ($fieldType) {
+            case 'bool':
+            case 'boolean':
+                $result = 'boolean';
+                break;
+            case 'bit':
+            case 'tinyint':
+            case 'smallint':
+            case 'mediumint':
+            case 'int':
+            case 'integer':
+            case 'bigint':
+                $result = 'integer';
+                break;
+            case 'decimal':
+            case 'dec':
+            case 'float':
+            case 'double':
+                $result = 'number';
+                break;
+            case 'timestamp':
+                $result = 'timestamp';
+                break;
+            case 'date':
+            case 'datetime':
+                $result = 'datetime';
+                break;
+            default:
+                $result = 'string';
+        }
 
-      return $this->_Structure;
-   }
+        return $result;
+    }
+
+    /**
+     * Generate a Garden Schema instance, based on the database table schema.
+     *
+     * @param string $table Target table for building the Schema.
+     * @return \Garden\Schema\Schema
+     */
+    public function simpleSchema(string $table): \Garden\Schema\Schema {
+        $properties = [];
+        $required = [];
+        $databaseSchema = $this->sql()->fetchTableSchema($table);
+
+        /** @var object $databaseField */
+        foreach ($databaseSchema as $databaseField) {
+            $type = $this->simpleDataType($databaseField->Type);
+            $allowNull = (bool)$databaseField->AllowNull;
+            $isAutoIncrement = (bool)$databaseField->AutoIncrement;
+            $hasDefault = !($databaseField->Default === null);
+            $isRequired = !$allowNull && !$isAutoIncrement && !$hasDefault;
+            if ($isRequired) {
+                $required[] = $databaseField->Name;
+            }
+
+            $field = [
+                'allowNull' => $allowNull,
+                'required' => $isRequired,
+                'type' => $type,
+            ];
+            if ($type === 'string' && $databaseField->Length) {
+                $field['maxLength'] = $databaseField->Length;
+            }
+            if (is_array($databaseField->Enum) && !empty($databaseField->Enum)) {
+                $field['enum'] = $databaseField->Enum;
+            }
+
+            // Garden Schema requires appending a question mark to the field name if it's not required.
+            $key = $databaseField->Name;
+            $properties[$key] = $field;
+        }
+
+        $result = \Garden\Schema\Schema::parse(['type' => 'object', 'properties' => $properties, 'required' => $required]);
+        return $result;
+    }
+
+    /**
+     * The slave connection to the database.
+     *
+     * @return PDO
+     */
+    public function slave() {
+        if ($this->_Slave === null) {
+            if (empty($this->_SlaveConfig) || empty($this->_SlaveConfig['Dsn'])) {
+                $this->_Slave = $this->connection();
+            } else {
+                $this->_Slave = $this->newPDO($this->_SlaveConfig['Dsn'], val('User', $this->_SlaveConfig), val('Password', $this->_SlaveConfig));
+            }
+        }
+
+        return $this->_Slave;
+    }
+
+    /**
+     * Get the database driver class for the database.
+     *
+     * @return Gdn_SQLDriver The database driver class associated with this database.
+     */
+    public function sql() {
+        if (is_null($this->_SQL)) {
+            $name = $this->Engine.'Driver';
+            $this->_SQL = Gdn::factory($name);
+            if (!$this->_SQL) {
+                throw new Exception("Could not instantiate database driver '$name'.");
+            }
+            $this->_SQL->Database = $this;
+        }
+
+        return $this->_SQL;
+    }
+
+    /**
+     * Get the database structure class for this database.
+     *
+     * @return Gdn_DatabaseStructure The database structure class for this database.
+     */
+    public function structure() {
+        if (is_null($this->_Structure)) {
+            $name = $this->Engine.'Structure';
+            $this->_Structure = Gdn::factory($name, $this);
+        }
+
+        return $this->_Structure;
+    }
 }

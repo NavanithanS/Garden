@@ -1,1051 +1,1235 @@
-<?php if (!defined('APPLICATION')) exit();
-/*
-Copyright 2008, 2009 Vanilla Forums Inc.
-This file is part of Garden.
-Garden is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-Garden is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
-You should have received a copy of the GNU General Public License along with Garden.  If not, see <http://www.gnu.org/licenses/>.
-Contact Vanilla Forums Inc. at support [at] vanillaforums [dot] com
-*/
-/**
- * User Controller
- *
- * @package Dashboard
- */
-
+<?php
 /**
  * Manage users.
  *
- * @since 2.0.0
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
  * @package Dashboard
+ * @since 2.0
+ */
+
+use Vanilla\Contracts\ConfigurationInterface;
+
+/**
+ * Handles /user endpoint.
  */
 class UserController extends DashboardController {
-   /** @var array Models to automatically instantiate. */
-   public $Uses = array('Database', 'Form');
 
-   /**
-    * @var Gdn_Form
-    */
-   public $Form;
+    /** @var ConfigurationInterface */
+    private $config;
 
-   /**
-    * Highlight menu path. Automatically run on every use.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function Initialize() {
-      parent::Initialize();
-      Gdn_Theme::Section('Dashboard');
-      if ($this->Menu)
-         $this->Menu->HighlightRoute('/dashboard/settings');
-   }
+    /** @var array Models to automatically instantiate. */
+    public $Uses = ['Database', 'Form'];
 
-   /**
-    * User management list.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param mixed $Keywords Term or array of terms to filter list of users.
-    * @param int $Page Page number.
-    * @param string $Order Sort order for list.
-    */
-   public function Index($Keywords = '', $Page = '', $Order = '') {
-      $this->Permission(
-         array(
-            'Garden.Users.Add',
-            'Garden.Users.Edit',
-            'Garden.Users.Delete'
-         ),
-         '',
-         FALSE
-      );
+    /** @var Gdn_Form */
+    public $Form;
 
-      // Page setup
-      $this->AddJsFile('jquery.gardenmorepager.js');
-      $this->AddJsFile('user.js');
-      $this->Title(T('Users'));
-      $this->AddSideMenu('dashboard/user');
+    /** @var UserModel */
+    public $userModel;
 
-      // Form setup
-      $this->Form->Method = 'get';
+    /**
+     * Configure the controller.
+     *
+     * @param ConfigurationInterface $config
+     * @param UserModel $userModel
+     */
+    public function __construct(ConfigurationInterface $config = null, UserModel $userModel = null) {
+        $this->config = $config instanceof ConfigurationInterface ? $config : Gdn::getContainer()->get(ConfigurationInterface::class);
+        $this->userModel = $userModel instanceof UserModel ? $userModel : Gdn::getContainer()->get(UserModel::class);
+        parent::__construct();
+    }
 
-      // Input Validation.
-      list($Offset, $Limit) = OffsetLimit($Page, PagerModule::$DefaultPageSize);
-      if (!$Keywords) {
-         $Keywords = $this->Form->GetFormValue('Keywords');
-         if ($Keywords)
-            $Offset = 0;
-      }
+    /**
+     * Highlight menu path. Automatically run on every use.
+     *
+     * @since 2.0.0
+     * @access public
+     */
+    public function initialize() {
+        parent::initialize();
+        Gdn_Theme::section('Dashboard');
+        if ($this->Menu) {
+            $this->Menu->highlightRoute('/dashboard/settings');
+        }
+        $this->fireEvent('Init');
+    }
 
-      // Put the Keyword back in the form
-      if ($Keywords)
-         $this->Form->SetFormValue('Keywords', $Keywords);
+    /**
+     * User management list.
+     *
+     * @param string|string[] $keywords Term or array of terms to filter list of users.
+     * @param string $page Page number.
+     * @param string $order Sort order for list.
+     */
+    public function index($keywords = '', $page = '', $order = '') {
+        $this->permission(
+            [
+                'Garden.Users.Add',
+                'Garden.Users.Edit',
+                'Garden.Users.Delete'
+            ],
+            '',
+            false
+        );
 
-      $UserModel = new UserModel();
-      //$Like = trim($Keywords) == '' ? FALSE : array('u.Name' => $Keywords, 'u.Email' => $Keywords);
-      list($Offset, $Limit) = OffsetLimit($Page, 30);
+        // Page setup
+        $this->addJsFile('jquery.gardenmorepager.js');
+        $this->addJsFile('user.js');
+        $this->title(t('Users'));
+        $this->setHighlightRoute('dashboard/user');
+        Gdn_Theme::section('Moderation');
 
-      $Filter = $this->_GetFilter();
-      if ($Filter)
-         $Filter['Keywords'] = $Keywords;
-      else
-         $Filter = $Keywords;
+        // Form setup
+        $this->Form->Method = 'get';
 
-      $this->SetData('RecordCount', $UserModel->SearchCount($Filter));
-
-      // Sorting
-      if (in_array($Order, array('DateInserted','DateFirstVisit', 'DateLastActive'))) {
-         $Order = 'u.'.$Order;
-         $OrderDir = 'desc';
-      } else {
-         $Order = 'u.Name';
-         $OrderDir = 'asc';
-      }
-
-      // Get user list
-      $this->UserData = $UserModel->Search($Filter, $Order, $OrderDir, $Limit, $Offset);
-      $this->SetData('Users', $this->UserData);
-      RoleModel::SetUserRoles($this->UserData->Result());
-
-      // Deliver json data if necessary
-      if ($this->_DeliveryType != DELIVERY_TYPE_ALL && $this->_DeliveryMethod == DELIVERY_METHOD_XHTML) {
-         $this->SetJson('LessRow', $this->Pager->ToString('less'));
-         $this->SetJson('MoreRow', $this->Pager->ToString('more'));
-         $this->View = 'users';
-      }
-
-      $this->Render();
-   }
-
-   /**
-    * Create a user.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function Add() {
-      $this->Permission('Garden.Users.Add');
-
-      // Page setup
-      $this->AddJsFile('user.js');
-      $this->Title(T('Add User'));
-      $this->AddSideMenu('dashboard/user');
-
-      $RoleModel = new RoleModel();
-      $RoleData = $AllRoles = $RoleModel->GetArray();
-
-      // If not administrator, restrict to default registration roles.
-      if (!CheckPermission('Garden.Settings.Manage')) {
-         $DefaultRoleIDs = C('Garden.Registration.DefaultRoles', array(8));
-         $DefaultRoles = array_combine($DefaultRoleIDs, $DefaultRoleIDs);
-         $RoleData = array_intersect_key($AllRoles, $DefaultRoles);
-      }
-
-      // By default, people with access here can freely assign all roles
-      $this->RoleData = $RoleData;
-
-      $UserModel = new UserModel();
-      $this->User = FALSE;
-
-      // Set the model on the form.
-      $this->Form->SetModel($UserModel);
-
-      try {
-         // These are all the 'effective' roles for this add action. This list can
-         // be trimmed down from the real list to allow subsets of roles to be edited.
-         $this->EventArguments['RoleData'] = &$this->RoleData;
-
-         $this->FireEvent("BeforeUserAdd");
-
-         if ($this->Form->AuthenticatedPostBack()) {
-
-            // These are the new roles the creating user wishes to apply to the target
-            // user, adjusted for his ability to affect those roles
-            $RequestedRoles = $this->Form->GetFormValue('RoleID');
-
-            if (!is_array($RequestedRoles)) $RequestedRoles = array();
-            $RequestedRoles = array_flip($RequestedRoles);
-            $UserNewRoles = array_intersect_key($this->RoleData, $RequestedRoles);
-
-            // Put the data back into the forum object as if the user had submitted
-            // this themselves
-            $this->Form->SetFormValue('RoleID', array_keys($UserNewRoles));
-
-            $NewUserID = $this->Form->Save(array('SaveRoles' => TRUE, 'NoConfirmEmail' => TRUE));
-            if ($NewUserID !== FALSE) {
-               $Password = $this->Form->GetValue('Password', '');
-               $UserModel->SendWelcomeEmail($NewUserID, $Password, 'Add');
-               $this->InformMessage(T('The user has been created successfully'));
-               $this->RedirectUrl = Url('dashboard/user');
+        // Input Validation.
+        list($offset, $limit) = offsetLimit($page, PagerModule::$DefaultPageSize);
+        if (!$keywords) {
+            $keywords = $this->Form->getFormValue('Keywords');
+            if ($keywords) {
+                $offset = 0;
             }
+        }
 
-            $this->UserRoleData = $UserNewRoles;
-         } else {
-            // Set the default roles.
-            $this->UserRoleData = C('Garden.Registration.DefaultRoles', array());
-         }
+        if (!is_string($keywords)) {
+            $keywords = '';
+        }
 
-      } catch (Exception $Ex) {
-         $this->Form->AddError($Ex);
-      }
-      $this->Render();
-   }
+        // Put the Keyword back in the form
+        if ($keywords) {
+            $this->Form->setFormValue('Keywords', $keywords);
+        }
 
-   /**
-    * Show how many applicants are in the queue.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function ApplicantCount() {
-      $this->Permission('Garden.Users.Approve');
-      $RoleModel = new RoleModel();
-      $Count = $RoleModel->GetApplicantCount();
-      if ($Count > 0)
-         echo '<span class="Alert">', $Count, '</span>';
-   }
+        $userModel = new UserModel();
 
-	/**
-    * Show applicants queue.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-	public function Applicants() {
-      $this->Permission('Garden.Users.Approve');
-      $this->AddSideMenu('dashboard/user/applicants');
-      $this->AddJsFile('jquery.gardencheckcolumn.js');
-      $this->Title(T('Applicants'));
+        list($offset, $limit) = offsetLimit($page, 30);
 
-      $this->FireEvent('BeforeApplicants');
+        // Determine our data filters.
+        $filter = $this->_getFilter();
+        if ($filter) {
+            $filter['Keywords'] = $keywords;
+        } else {
+            $filter = ['Keywords' => (string)$keywords];
+        }
+        $filter['Optimize'] = Gdn::userModel()->pastUserThreshold();
 
-      if ($this->Form->AuthenticatedPostBack() === TRUE) {
-         $Action = $this->Form->GetValue('Submit');
-         $Applicants = $this->Form->GetValue('Applicants');
-         $ApplicantCount = is_array($Applicants) ? count($Applicants) : 0;
-         if ($ApplicantCount > 0 && in_array($Action, array('Approve', 'Decline'))) {
-            $Session = Gdn::Session();
-            for ($i = 0; $i < $ApplicantCount; ++$i) {
-               $this->HandleApplicant($Action, $Applicants[$i]);
-            }
-         }
-      }
-      $UserModel = Gdn::UserModel();
-      $this->UserData = $UserModel->GetApplicants();
-      $this->View = 'applicants';
-      $this->Render();
-   }
+        // Sorting
+        if (in_array($order, ['DateInserted', 'DateFirstVisit', 'DateLastActive'])) {
+            $order = 'u.'.$order;
+            $orderDir = 'desc';
+        } else {
+            $order = 'u.Name';
+            $orderDir = 'asc';
+        }
 
-   /**
-    * Approve a user application.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param int $UserID Unique ID.
-    * @param string $TransientKey Security token.
-    */
-	public function Approve($UserID = '', $TransientKey = '') {
-      $this->Permission('Garden.Users.Approve');
-      $Session = Gdn::Session();
-      if ($Session->ValidateTransientKey($TransientKey)) {
-         $Approved = $this->HandleApplicant('Approve', $UserID);
-         if ($Approved) {
-            $this->InformMessage(T('Your changes have been saved.'));
-         }
-      }
+        // Get user list
+        $this->UserData = $userModel->search($filter, $order, $orderDir, $limit, $offset);
+        $this->setData('Users', $this->UserData);
 
-      if ($this->_DeliveryType == DELIVERY_TYPE_BOOL) {
-         return $this->Form->ErrorCount() == 0 ? TRUE : $this->Form->Errors();
-      } else {
-         $this->Applicants();
-      }
-   }
-
-   public function Authenticate() {
-      if (!$this->Request->IsPostBack()) {
-         throw ForbiddenException($this->Request->RequestMethod());
-      }
-
-      $Args = array_change_key_case($this->Form->FormValues());
-      $UserModel = new UserModel();
-
-      // Look up the user.
-      $User = NULL;
-      if ($Email = GetValue('email', $Args)) {
-         $User = $UserModel->GetByEmail($Email);
-      } elseif ($Name = GetValue('name', $Args)) {
-         $User = $UserModel->GetByUsername($Name);
-      } else {
-         throw new Gdn_UserException("One of the following parameters required: Email, Name.", 400);
-      }
-
-      if (!$User)
-         throw NotFoundException('User');
-
-      // Check the password.
-      $PasswordHash = new Gdn_PasswordHash();
-      $Password = $this->Form->GetFormValue('Password');
-      try {
-         $PasswordChecked = $PasswordHash->CheckPassword($Password, GetValue('Password', $User), GetValue('HashMethod', $User));
-
-         // Rate limiting
-         Gdn::UserModel()->RateLimit($User, $PasswordChecked);
-
-         if ($PasswordChecked) {
-            $this->SetData('User', ArrayTranslate((array)$User, array('UserID', 'Name', 'Email', 'PhotoUrl')));
-
-            if (GetValue('session', $Args)) {
-               Gdn::Session()->Start($this->Data('User.UserID'));
-               $this->SetData('Cookie', array(
-                     C('Garden.Cookie.Name') =>  $_COOKIE[C('Garden.Cookie.Name')]
-                  ));
-            }
-         } else {
-            throw new Exception(T('Invalid password.'), 401); // Can't be a user exception.
-         }
-      } catch (Gdn_UserException $Ex) {
-         $this->Form->AddError($Ex);
-      }
-
-      $this->Render();
-   }
-
-	/**
-    * Autocomplete a username.
-    *
-    * @since 2.0.0
-    * @access public
-    */
-   public function AutoComplete() {
-      $this->DeliveryType(DELIVERY_TYPE_NONE);
-      $Q = GetIncomingValue('q');
-      $UserModel = new UserModel();
-      $Data = $UserModel->GetLike(array('u.Name' => $Q), 'u.Name', 'asc', 10, 0);
-      foreach ($Data->Result() as $User) {
-         echo htmlspecialchars($User->Name).'|'.Gdn_Format::Text($User->UserID)."\n";
-      }
-      $this->Render();
-   }
-
-   /**
-    * Ban a user and optionally delete their content.
-    * @since 2.1
-    * @param type $UserID
-    */
-   public function Ban($UserID, $Unban = FALSE) {
-      $this->Permission(array('Garden.Moderation.Manage','Garden.Users.Edit','Moderation.Users.Ban'), FALSE);
-
-      $User = Gdn::UserModel()->GetID($UserID, DATASET_TYPE_ARRAY);
-      if (!$User)
-         throw NotFoundException($User);
-
-//      $this->Form = new Gdn_Form();
-
-      $UserModel = Gdn::UserModel();
-
-      // Block banning the superadmin or System accounts
-      $User = $UserModel->GetID($UserID);
-      if (GetValue('Admin', $User) == 2)
-         throw ForbiddenException("@You may not ban a System user.");
-      elseif (GetValue('Admin', $User))
-         throw ForbiddenException("@You may not ban a user with the Admin flag set.");
-
-
-      if ($this->Form->AuthenticatedPostBack()) {
-         if ($Unban) {
-            $UserModel->Unban($UserID, array('RestoreContent' => $this->Form->GetFormValue('RestoreContent')));
-         } else {
-            if (!ValidateRequired($this->Form->GetFormValue('Reason'))) {
-               $this->Form->AddError('ValidateRequired', 'Reason');
-            }
-            if ($this->Form->GetFormValue('Reason') == 'Other' && !ValidateRequired($this->Form->GetFormValue('ReasonText'))) {
-               $this->Form->AddError('ValidateRequired', 'Reason Text');
-            }
-
-            if ($this->Form->ErrorCount() == 0) {
-               if ($this->Form->GetFormValue('Reason') == 'Other')
-                  $Reason = $this->Form->GetFormValue('ReasonText');
-               else
-                  $Reason = $this->Form->GetFormValue('Reason');
-
-               // Just because we're banning doesn't mean we can nuke their content
-               $DeleteContent = (CheckPermission('Garden.Moderation.Manage')) ? $this->Form->GetFormValue('DeleteContent') : FALSE;
-               $UserModel->Ban($UserID, array('Reason' => $Reason, 'DeleteContent' => $DeleteContent));
-            }
-         }
-
-         if ($this->Form->ErrorCount() == 0) {
-            // Redirect after a successful save.
-            if ($this->Request->Get('Target')) {
-               $this->RedirectUrl = $this->Request->Get('Target');
-            } elseif ($this->DeliveryType() == DELIVERY_TYPE_ALL) {
-               $this->RedirectUrl = Url(UserUrl($User));
+        // Figure out our number of results and users.
+        $showUserCount = $this->UserData->count();
+        if (!Gdn::userModel()->pastUserThreshold()) {
+            // Pfft, query that sucker however you want.
+            $this->setData('RecordCount', $userModel->searchCount($filter));
+        } else {
+            // We have a user search, so at least set enough data for the Next pager.
+            if ($showUserCount) {
+                $this->setData('_CurrentRecords', $showUserCount);
             } else {
-               $this->JsonTarget('', '', 'Refresh');
+                // No search was done. Just give the total users overall. First, zero-out our pager.
+                $this->setData('_CurrentRecords', 0);
+                if (!Gdn::userModel()->pastUserMegaThreshold()) {
+                    // Restoring this semi-optimized counter is our compromise to let non-mega sites know their exact total users.
+                    $this->setData('UserCount', $userModel->getCount());
+                } else {
+                    // Dang, yo. Get a table status guess instead of really counting.
+                    $this->setData('UserEstimate', Gdn::userModel()->countEstimate());
+                }
             }
-         }
-      }
+        }
 
-      // Permission flag for view
-      $this->SetData('_MayDeleteContent', CheckPermission('Garden.Moderation.Manage'));
+        // Add roles to the user data.
+        RoleModel::setUserRoles($this->UserData->result());
 
-      $this->SetData('User', $User);
-      $this->AddSideMenu();
-      $this->Title($Unban ? T('Unban User') : T('Ban User'));
-      if ($Unban)
-         $this->View = 'Unban';
-      $this->Render();
-   }
+        // Deliver json data if necessary
+        if ($this->_DeliveryType != DELIVERY_TYPE_ALL && $this->_DeliveryMethod == DELIVERY_METHOD_XHTML) {
+            $this->setJson('LessRow', $this->Pager->toString('less'));
+            $this->setJson('MoreRow', $this->Pager->toString('more'));
+            $this->View = 'users';
+        }
 
-	/**
-    * Page thru user list.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param mixed $Keywords Term or list of terms to limit search.
-    * @param int $Page Page number.
-    * @param string $Order Sort order.
-    */
-   public function Browse($Keywords = '', $Page = '', $Order = '') {
-      $this->View = 'index';
-      $this->Index($Keywords, $Page, $Order = '');
-   }
+        $this->render();
+    }
 
-   /**
-    * Decline a user application.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param int $UserID Unique ID.
-    * @param string $TransientKey Security token.
-    */
-   public function Decline($UserID = '', $TransientKey = '') {
-      $this->Permission('Garden.Users.Approve');
-      $Session = Gdn::Session();
-      if ($Session->ValidateTransientKey($TransientKey)) {
-         if ($this->HandleApplicant('Decline', $UserID))
-            $this->InformMessage(T('Your changes have been saved.'));
-      }
+    /**
+     * Create a user.
+     *
+     * @since 2.0.0
+     * @access public
+     */
+    public function add() {
+        $this->permission('Garden.Users.Add');
 
-      if ($this->_DeliveryType == DELIVERY_TYPE_BOOL) {
-         return $this->Form->ErrorCount() == 0 ? TRUE : $this->Form->Errors();
-      } else {
-         $this->Applicants();
-      }
-   }
+        // Page setup
+        $this->addJsFile('user.js');
+        $this->title(t('Add User'));
+        $this->setHighlightRoute('dashboard/user');
+        Gdn_Theme::section('Moderation');
 
-   /**
-    * Delete a user account.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param int $UserID Unique ID.
-    * @param string $Method Type of deletion to do (delete, keep, or wipe).
-    */
-   public function Delete($UserID = '', $Method = '') {
-      $this->Permission('Garden.Users.Delete');
-      $Session = Gdn::Session();
-      if($Session->User->UserID == $UserID)
-         trigger_error(ErrorMessage("You cannot delete the user you are logged in as.", $this->ClassName, 'FetchViewLocation'), E_USER_ERROR);
-      $this->AddSideMenu('dashboard/user');
-      $this->Title(T('Delete User'));
+        $roleModel = new RoleModel();
+        $roleData = $roleModel->getAssignable();
+        $userRoleData = RoleModel::getDefaultRoles(RoleModel::TYPE_MEMBER);
 
-      $RoleModel = new RoleModel();
-      $AllRoles = $RoleModel->GetArray();
+        $userModel = new UserModel();
+        $this->setData('User', false);
 
-      // By default, people with access here can freely assign all roles
-      $this->RoleData = $AllRoles;
+        // Set the model on the form.
+        $this->Form->setModel($userModel);
 
-      $UserModel = new UserModel();
-      $this->User = $UserModel->GetID($UserID);
+        try {
+            // These are all the 'effective' roles for this add action. This list can
+            // be trimmed down from the real list to allow subsets of roles to be edited.
+            $this->EventArguments['RoleData'] = &$roleData;
+            $this->setData('Roles', $roleData);
+            $this->fireEvent("BeforeUserAdd");
+            if ($this->Form->authenticatedPostBack(true)) {
+                // These are the new roles the creating user wishes to apply to the target
+                // user, adjusted for his ability to affect those roles
+                $requestedRoles = $this->Form->getFormValue('RoleID');
 
-      try {
+                if (!is_array($requestedRoles)) {
+                    $requestedRoles = [];
+                }
+                $requestedRoles = array_flip($requestedRoles);
+                $userNewRoles = array_intersect_key($roleData, $requestedRoles);
 
-         $CanDelete = TRUE;
-         $this->EventArguments['CanDelete'] = &$CanDelete;
-         $this->EventArguments['TargetUser'] = &$this->User;
+                // Put the data back into the forum object as if the user had submitted
+                // this themselves
+                $this->Form->setFormValue('RoleID', array_keys($userNewRoles));
 
-         // These are all the 'effective' roles for this delete action. This list can
-         // be trimmed down from the real list to allow subsets of roles to be
-         // edited.
-         $this->EventArguments['RoleData'] = &$this->RoleData;
+                $noPassword = (bool)$this->Form->getFormValue('NoPassword');
+                if ($noPassword) {
+                    $this->Form->setFormValue('Password', betterRandomString(15, 'Aa0'));
+                    $this->Form->setFormValue('HashMethod', 'Random');
+                }
 
-         $UserRoleData = $UserModel->GetRoles($UserID)->ResultArray();
-         $RoleIDs = ConsolidateArrayValuesByKey($UserRoleData, 'RoleID');
-         $RoleNames = ConsolidateArrayValuesByKey($UserRoleData, 'Name');
-         $this->UserRoleData = ArrayCombine($RoleIDs, $RoleNames);
-         $this->EventArguments['UserRoleData'] = &$this->UserRoleData;
-
-         $this->FireEvent("BeforeUserDelete");
-         $this->SetData('CanDelete', $CanDelete);
-
-         $Method = in_array($Method, array('delete', 'keep', 'wipe')) ? $Method : '';
-         $this->Method = $Method;
-         if ($Method != '')
-            $this->View = 'deleteconfirm';
-
-         if ($this->Form->AuthenticatedPostBack() && $Method != '') {
-            $UserModel->Delete($UserID, array('DeleteMethod' => $Method));
-            $this->View = 'deletecomplete';
-         }
-
-      } catch (Exception $Ex) {
-         $this->Form->AddError($Ex);
-      }
-      $this->Render();
-   }
-
-   public function Delete2() {
-      $this->Permission('Garden.Users.Delete');
-
-      if (!Gdn::Request()->IsPostBack())
-         throw new Exception('Requires POST', 405);
-
-      $this->Form->ValidateRule('UserID', 'ValidateRequired');
-      $DeleteType = $this->Form->GetFormValue('DeleteMethod');
-      if (!in_array($DeleteType, array('delete', 'keep', 'wipe'))) {
-         $this->Form->AddError(T('DeleteMethod must be one of: delete, keep, wipe.'));
-      }
-
-      $UserID = $this->Form->GetFormValue('UserID');
-
-      $User = Gdn::UserModel()->GetID($UserID, DATASET_TYPE_ARRAY);
-      if ($UserID && !$User)
-         throw NotFoundException('User');
-
-      if ($User['Admin'] == 2)
-         $this->Form->AddError(T('You cannot delete a system-created user.'));
-      elseif ($User['Admin'])
-         $this->Form->AddError(T('You cannot delete a super-admin.'));
-
-      if ($this->Form->ErrorCount() == 0) {
-         Gdn::UserModel()->Delete($UserID, array(
-            'DeleteMethod' => $this->Form->GetFormValue('DeleteMethod'),
-            'Log' => TRUE));
-         $this->SetData('Result', sprintf(T('%s was deleted.'), $User['Name']));
-      }
-      $this->Render('Blank', 'Utility');
-   }
-
-   public function DeleteContent($UserID) {
-      $this->Permission('Garden.Moderation.Manage');
-
-      $User = Gdn::UserModel()->GetID($UserID);
-      if (!$User)
-         throw NotFoundException('User');
-
-      if ($this->Form->AuthenticatedPostBack()) {
-         Gdn::UserModel()->DeleteContent($UserID, array('Log' => TRUE));
-
-         if ($this->Request->Get('Target')) {
-            $this->RedirectUrl = Url($this->Request->Get('Target'));
-         } else {
-            $this->RedirectUrl = Url(UserUrl($User));
-         }
-      } else {
-         $this->SetData('Title', T('Are you sure you want to do this?'));
-      }
-
-      $this->SetData('User', $User);
-      $this->Render();
-   }
-
-   /**
-    * Edit a user account.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param int $UserID Unique ID.
-    */
-   public function Edit($UserID) {
-      $this->Permission('Garden.Users.Edit');
-
-      // Page setup
-      $this->AddJsFile('user.js');
-      $this->Title(T('Edit User'));
-      $this->AddSideMenu('dashboard/user');
-
-      // Only admins can reassign roles
-      $RoleModel = new RoleModel();
-      $AllRoles = $RoleModel->GetArray();
-      $RoleData = (CheckPermission('Garden.Settings.Manage')) ? $AllRoles : array();
-
-      $UserModel = new UserModel();
-      $User = $UserModel->GetID($UserID, DATASET_TYPE_ARRAY);
-
-      // Determine if username can be edited
-      $CanEditUsername = (bool)C("Garden.Profile.EditUsernames") || Gdn::Session()->CheckPermission('Garden.Users.Edit');
-      $this->SetData('_CanEditUsername', $CanEditUsername);
-
-      // Determine if emails can be edited
-      $CanEditEmail = Gdn::Session()->CheckPermission('Garden.Users.Edit');
-      $this->SetData('_CanEditEmail', $CanEditEmail);
-
-      // Decide if they have ability to confirm users
-      $Confirmed = (bool)GetValueR('Confirmed', $User);
-      $CanConfirmEmail = (
-              UserModel::RequireConfirmEmail() &&
-              Gdn::Session()->CheckPermission('Garden.Users.Edit'));
-      $this->SetData('_CanConfirmEmail', $CanConfirmEmail);
-      $this->SetData('_EmailConfirmed', $Confirmed);
-      $User['ConfirmEmail'] = (int)$Confirmed;
-
-      // Determine whether user being edited is privileged (can escalate permissions)
-      $UserModel = new UserModel();
-      $EditingPrivilegedUser = $UserModel->CheckPermission($User, 'Garden.Settings.Manage');
-
-      // Determine our password reset options
-      // Anyone with user editing my force reset over email
-      $this->ResetOptions = array(
-         0 => T('Keep current password.'),
-         'Auto' => T('Force user to reset their password and send email notification.')
-      );
-      // Only admins may manually reset passwords for other admins
-      if (CheckPermission('Garden.Settings.Manage') || !$EditingPrivilegedUser)
-         $this->ResetOptions['Manual'] = T('Manually set user password. No email notification.');
-
-      // Set the model on the form.
-      $this->Form->SetModel($UserModel);
-
-      // Make sure the form knows which item we are editing.
-      $this->Form->AddHidden('UserID', $UserID);
-
-      try {
-
-         $AllowEditing = TRUE;
-         $this->EventArguments['AllowEditing'] = &$AllowEditing;
-         $this->EventArguments['TargetUser'] = &$User;
-
-         // These are all the 'effective' roles for this edit action. This list can
-         // be trimmed down from the real list to allow subsets of roles to be
-         // edited.
-         $this->EventArguments['RoleData'] = &$RoleData;
-
-         $UserRoleData = $UserModel->GetRoles($UserID)->ResultArray();
-         $RoleIDs = ConsolidateArrayValuesByKey($UserRoleData, 'RoleID');
-         $RoleNames = ConsolidateArrayValuesByKey($UserRoleData, 'Name');
-         $UserRoleData = ArrayCombine($RoleIDs, $RoleNames);
-         $this->EventArguments['UserRoleData'] = &$UserRoleData;
-
-         $this->FireEvent("BeforeUserEdit");
-         $this->SetData('AllowEditing', $AllowEditing);
-
-         $this->Form->SetData($User);
-         if ($this->Form->AuthenticatedPostBack()) {
-
-            if (!$CanEditUsername)
-               $this->Form->SetFormValue("Name", $User['Name']);
-
-            // Allow mods to confirm/unconfirm emails
-            $this->Form->RemoveFormValue('Confirmed');
-            $Confirmation = $this->Form->GetFormValue('ConfirmEmail', null);
-            $Confirmation = !is_null($Confirmation) ? (bool)$Confirmation : null;
-
-            if ($CanConfirmEmail && is_bool($Confirmation))
-               $this->Form->SetFormValue('Confirmed', (int)$Confirmation);
-
-            $ResetPassword = $this->Form->GetValue('ResetPassword', FALSE);
-
-            // If we're an admin or this isn't a privileged user, allow manual setting of password
-            $AllowManualReset = (CheckPermission('Garden.Settings.Manage') || !$EditingPrivilegedUser);
-            if ($ResetPassword == 'Manual' && $AllowManualReset) {
-               // If a new password was specified, add it to the form's collection
-               $NewPassword = $this->Form->GetValue('NewPassword', '');
-               $this->Form->SetFormValue('Password', $NewPassword);
+                $newUserID = $this->Form->save(['SaveRoles' => true, 'NoConfirmEmail' => true, 'ValidateName' => false]);
+                if ($newUserID !== false) {
+                    $this->setData('UserID', $newUserID);
+                    if ($noPassword) {
+                        $password = t('No password');
+                    } else {
+                        $password = $this->Form->getValue('Password', '');
+                    }
+                    if ($this->Form->getFormValue('Email', false)) {
+                        $userModel->sendWelcomeEmail($newUserID, $password, 'Add');
+                    }
+                    $this->informMessage(t('The user has been created successfully'));
+                    $this->setRedirectTo('dashboard/user');
+                } elseif ($noPassword) {
+                    $this->Form->setFormValue('Password', '');
+                    $this->Form->setFormValue('HashMethod', '');
+                }
+                $userRoleData = $userNewRoles;
             }
+        } catch (Exception $ex) {
+            $this->Form->addError($ex);
+            $this->Form->clearInputs();
+        }
 
-            // Role changes
+        $this->addDefinition('ApprovedTranslation', t('Approved'));
+        $this->addDefinition('DeniedTranslation', t('Denied'));
 
-            // These are the new roles the editing user wishes to apply to the target
-            // user, adjusted for his ability to affect those roles
-            $RequestedRoles = $this->Form->GetFormValue('RoleID');
+        $this->setData('UserRoles', $userRoleData);
+        $this->render('edit', 'user');
+    }
 
-            if (!is_array($RequestedRoles)) $RequestedRoles = array();
-            $RequestedRoles = array_flip($RequestedRoles);
-            $UserNewRoles = array_intersect_key($RoleData, $RequestedRoles);
+    /**
+     * Should guest users be allowed to search existing users by name and email?
+     *
+     * @param bool $throw Throw an exception if the action is not allowed?
+     * @return boolean
+     */
+    private function verifyGuestSearchAllowed(bool $throw): bool {
+        $result = $this->userModel->allowGuestUserSearch();
+        if (!$result && $throw) {
+            throw new Gdn_UserException("This action is not allowed for private communities.");
+        }
+        return $result;
+    }
 
-            // These roles will stay turned on regardless of the form submission contents
-            // because the editing user does not have permission to modify them
-            $ImmutableRoles = array_diff_key($AllRoles, $RoleData);
-            $UserImmutableRoles = array_intersect_key($ImmutableRoles, $UserRoleData);
+    /**
+     * Show how many applicants are in the queue.
+     *
+     * @since 2.0.0
+     * @access public
+     */
+    public function applicantCount() {
+        $this->permission('Garden.Users.Approve');
+        $roleModel = new RoleModel();
+        $count = $roleModel->getApplicantCount();
+        if ($count > 0) {
+            echo '<span class="Alert">'.$count.'</span>';
+        }
+    }
 
-            // Apply immutable roles
-            foreach ($UserImmutableRoles as $IMRoleID => $IMRoleName)
-               $UserNewRoles[$IMRoleID] = $IMRoleName;
+    /**
+     * Show applicants queue.
+     *
+     * @since 2.0.0
+     * @access public
+     */
+    public function applicants() {
+        $this->permission('Garden.Users.Approve');
+        $this->setHighlightRoute('dashboard/user/applicants');
+        $this->addJsFile('applicants.js');
+        $this->title(t('Applicants'));
+        $this->fireEvent('BeforeApplicants');
+        $userModel = Gdn::userModel();
+        $this->UserData = $userModel->getApplicants();
+        Gdn_Theme::section('Moderation');
+        $this->render();
+    }
 
-            // Put the data back into the forum object as if the user had submitted
-            // this themselves
-            $this->Form->SetFormValue('RoleID', array_keys($UserNewRoles));
+    /**
+     * Approve a user application.
+     *
+     * @since 2.0.0
+     * @access public
+     * @param int $userID Unique ID.
+     * @param string $TransientKey Security token.
+     */
+    public function approve($userID = '') {
+        if (!Gdn::request()->isAuthenticatedPostBack(true)) {
+            throw new Exception('Requires POST', 405);
+        }
+        $this->permission('Garden.Users.Approve');
 
-            if ($this->Form->Save(array('SaveRoles' => TRUE)) !== FALSE) {
-               if ($this->Form->GetValue('ResetPassword', '') == 'Auto') {
-                  $UserModel->PasswordRequest($User['Email']);
-                  $UserModel->SetField($UserID, 'HashMethod', 'Reset');
-               }
+        $this->handleApplicant('Approve', $userID);
 
-               $this->InformMessage(T('Your changes have been saved.'));
+        // Prevent an error if ajax failed.
+        if ($this->_DeliveryType == DELIVERY_TYPE_ALL) {
+            $this->render('blank', 'utility');
+        } else {
+            $this->render();
+        }
+    }
+
+    /**
+     *
+     *
+     * @throws Exception
+     * @throws Gdn_UserException
+     */
+    public function authenticate() {
+        if (!$this->Request->isPostBack()) {
+            throw forbiddenException($this->Request->requestMethod());
+        }
+
+        $args = array_change_key_case($this->Form->formValues());
+        $userModel = new UserModel();
+
+        // Look up the user.
+        $user = null;
+        if ($email = val('email', $args)) {
+            $user = $userModel->getByEmail($email);
+        } elseif ($name = val('name', $args)) {
+            $user = $userModel->getByUsername($name);
+        } else {
+            throw new Gdn_UserException("One of the following parameters required: Email, Name.", 400);
+        }
+
+        if (!$user) {
+            throw notFoundException('User');
+        }
+
+        // Check the password.
+        $passwordHash = new Gdn_PasswordHash();
+        $password = val('password', $args);
+        try {
+            $passwordChecked = $passwordHash->checkPassword($password, val('Password', $user), val('HashMethod', $user));
+
+            // Rate limiting
+            Gdn::userModel()->rateLimit($user);
+
+            if ($passwordChecked) {
+                $this->setData('User', arrayTranslate((array)$user, ['UserID', 'Name', 'Email', 'PhotoUrl']));
+
+                if (val('session', $args)) {
+                    Gdn::session()->start($this->data('User.UserID'));
+                    $this->setData('Cookie', [
+                        c('Garden.Cookie.Name') => $_COOKIE[c('Garden.Cookie.Name')]
+                    ]);
+                }
+            } else {
+                throw new Exception(t('Invalid password.'), 401); // Can't be a user exception.
+            }
+        } catch (Gdn_UserException $ex) {
+            $this->Form->addError($ex);
+        }
+
+        $this->render();
+    }
+
+    /**
+     * Autocomplete a username.
+     *
+     * @since 2.0.0
+     * @access public
+     */
+    public function autoComplete() {
+        $this->deliveryType(DELIVERY_TYPE_NONE);
+        $q = getIncomingValue('q');
+        $userModel = new UserModel();
+        $data = $userModel->getLike(['u.Name' => $q], 'u.Name', 'asc', 10, 0);
+        foreach ($data->result() as $user) {
+            echo htmlspecialchars($user->Name).'|'.Gdn_Format::text($user->UserID)."\n";
+        }
+        $this->render();
+    }
+
+    /**
+     * Ban a user and optionally delete their content.
+     *
+     * @param int $userID
+     */
+    public function ban($userID, $unban = false) {
+        $this->permission(['Garden.Moderation.Manage', 'Garden.Users.Edit', 'Moderation.Users.Ban'], false);
+
+        $user = Gdn::userModel()->getID($userID, DATASET_TYPE_ARRAY);
+        if (!$user) {
+            throw notFoundException($user);
+        }
+
+
+        $userPermissions = $this->userModel->getPermissions($userID);
+        $rankCompare = Gdn::session()->getPermissions()->compareRankTo($userPermissions);
+        if ($rankCompare < 0) {
+            throw forbiddenException('@'.t('You are not allowed to ban a user that has higher permissions than you.'));
+        } elseif ($rankCompare === 0) {
+            throw forbiddenException('@'.t('You are not allowed to ban a user with the same permission level as you.'));
+        }
+
+        // Is the user banned for other reasons?
+        $this->setData('OtherReasons', BanModel::isBanned(val('Banned', $user, 0), ~BanModel::BAN_MANUAL));
+
+
+        if ($this->Form->authenticatedPostBack(true)) {
+            if ($unban) {
+                $this->userModel->unban($userID, ['RestoreContent' => $this->Form->getFormValue('RestoreContent')]);
+            } else {
+                if (!validateRequired($this->Form->getFormValue('Reason'))) {
+                    $this->Form->addError('ValidateRequired', 'Reason');
+                }
+                if ($this->Form->getFormValue('Reason') == 'Other' && !validateRequired($this->Form->getFormValue('ReasonText'))) {
+                    $this->Form->addError('ValidateRequired', 'Reason Text');
+                }
+
+                if ($this->Form->errorCount() == 0) {
+                    if ($this->Form->getFormValue('Reason') == 'Other') {
+                        $reason = $this->Form->getFormValue('ReasonText');
+                    } else {
+                        $reason = $this->Form->getFormValue('Reason');
+                    }
+
+                    // Just because we're banning doesn't mean we can nuke their content
+                    $deleteContent = (checkPermission('Garden.Moderation.Manage')) ? $this->Form->getFormValue('DeleteContent') : false;
+                    $this->userModel->ban($userID, ['Reason' => $reason, 'DeleteContent' => $deleteContent]);
+                }
             }
 
-            $UserRoleData = $UserNewRoles;
-         }
-      } catch (Exception $Ex) {
-         $this->Form->AddError($Ex);
-      }
-
-      $this->SetData('User', $User);
-      $this->SetData('Roles', $RoleData);
-      $this->SetData('UserRoles', $UserRoleData);
-
-      $this->Render();
-   }
-
-   /**
-    * Determine whether user can register with this email address.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param string $Email Email address to be checked.
-    */
-	public function EmailAvailable($Email = '') {
-		$this->_DeliveryType = DELIVERY_TYPE_BOOL;
-      $Available = TRUE;
-
-      if (C('Garden.Registration.EmailUnique', TRUE) && $Email != '') {
-         $UserModel = Gdn::UserModel();
-         if ($UserModel->GetByEmail($Email))
-            $Available = FALSE;
-      }
-      if (!$Available)
-         $this->Form->AddError(sprintf(T('%s unavailable'), T('Email')));
-
-      $this->Render();
-	}
-
-   /**
-    * Get filter from current request.
-    *
-    * @since 2.0.0
-    * @access protected
-    */
-   protected function _GetFilter() {
-      $Filter = $this->Request->Get('Filter');
-      if ($Filter) {
-         $Parts = explode(' ', $Filter, 3);
-         if (count($Parts) < 2)
-            return FALSE;
-
-         $Field = $Parts[0];
-         if (count($Parts) == 2) {
-            $Op = '=';
-            $FilterValue = $Parts[1];
-         } else {
-            $Op = $Parts[1];
-            if (!in_array($Op, array('=', 'like'))) {
-               $Op = '=';
+            if ($this->Form->errorCount() == 0) {
+                // Redirect after a successful save.
+                if ($this->Request->get('Target')) {
+                    $this->setRedirectTo($this->Request->get('Target'));
+                } elseif ($this->deliveryType() == DELIVERY_TYPE_ALL) {
+                    $this->setRedirectTo(userUrl($user));
+                } else {
+                    $this->jsonTarget('', '', 'Refresh');
+                }
             }
-            $FilterValue = $Parts[2];
-         }
+        }
 
-         if (strpos($Field, '.') !== FALSE)
-            $Field = array_pop(explode('.', $Field));
+        // Permission flag for view
+        $this->setData('_MayDeleteContent', checkPermission('Garden.Moderation.Manage'));
 
-         if (!in_array($Field, array('Name', 'Email', 'LastIPAddress', 'InsertIPAddress', 'RankID', 'DateFirstVisit', 'DateLastVisit')))
-            return FALSE;
+        $this->setData('User', $user);
+        $this->title($unban ? t('Unban User') : t('Ban User'));
+        if ($unban) {
+            $this->View = 'Unban';
+        }
+        $this->render();
+    }
 
-         return array("$Field $Op" => $FilterValue);
-      }
-      return FALSE;
-   }
+    /**
+     * Page thru user list.
+     *
+     * @param string|string[] $keywords Term or list of terms to limit search.
+     * @param string $page Page number.
+     * @param string $order Sort order.
+     */
+    public function browse($keywords = '', $page = '', $order = '') {
+        $this->View = 'index';
+        $this->index($keywords, $page, $order = '');
+    }
 
-   /**
-    * Handle a user application.
-    *
-    * @since 2.0.0
-    * @access private
-    * @see self::Decline, self::Approve
-    * @param string $Action Approve or Decline.
-    * @param int $UserID Unique ID.
-    */
-   private function HandleApplicant($Action, $UserID) {
-      $this->Permission('Garden.Users.Approve');
+    /**
+     * Decline a user application.
+     *
+     * @since 2.0.0
+     * @access public
+     * @param int $userID Unique ID.
+     * @param string $TransientKey Security token.
+     */
+    public function decline($userID = '') {
+        if (!Gdn::request()->isAuthenticatedPostBack(true)) {
+            throw new Exception('Requires POST', 405);
+        }
+        $this->permission('Garden.Users.Approve');
 
-      //$this->_DeliveryType = DELIVERY_TYPE_BOOL;
-      if (!in_array($Action, array('Approve', 'Decline')) || !is_numeric($UserID)) {
-         $this->Form->AddError('ErrorInput');
-         $Result = FALSE;
-      } else {
-         $Session = Gdn::Session();
-         $UserModel = new UserModel();
-         if (is_numeric($UserID)) {
-            try {
-               $this->EventArguments['UserID'] = $UserID;
-               $this->FireEvent("Before{$Action}User");
+        $this->handleApplicant('Decline', $userID);
 
-               $Email = new Gdn_Email();
-               $Result = $UserModel->$Action($UserID, $Email);
+        // Prevent an error if ajax failed.
+        if ($this->_DeliveryType == DELIVERY_TYPE_ALL) {
+            $this->render('blank', 'utility');
+        } else {
+            $this->render();
+        }
+    }
 
-               // Re-calculate applicant count
-               $RoleModel = new RoleModel();
-               $RoleModel->GetApplicantCount(TRUE);
+    /**
+     * Delete a user account.
+     *
+     * @since 2.0.0
+     * @access public
+     * @param int $userID Unique ID.
+     * @param string $method Type of deletion to do (delete, keep, or wipe).
+     */
+    public function delete($userID = '', $method = '') {
+        $this->permission('Garden.Users.Delete');
+        $session = Gdn::session();
+        if ($session->User->UserID == $userID) {
+            trigger_error(errorMessage("You cannot delete the user you are logged in as.", $this->ClassName, 'FetchViewLocation'), E_USER_ERROR);
+        }
+        $this->setHighlightRoute('dashboard/user');
+        Gdn_Theme::section('Moderation');
+        $this->title(t('Delete User'));
 
-               $this->FireEvent("After{$Action}User");
-            } catch(Exception $ex) {
-               $Result = FALSE;
-               $this->Form->AddError(strip_tags($ex->getMessage()));
+        $roleModel = new RoleModel();
+        $allRoles = $roleModel->getArray();
+
+        // By default, people with access here can freely assign all roles
+        $this->RoleData = $allRoles;
+
+        $userModel = new UserModel();
+        $this->User = $userModel->getID($userID);
+
+        try {
+            $canDelete = true;
+            $this->EventArguments['CanDelete'] = &$canDelete;
+            $this->EventArguments['TargetUser'] = &$this->User;
+
+            // These are all the 'effective' roles for this delete action. This list can
+            // be trimmed down from the real list to allow subsets of roles to be
+            // edited.
+            $this->EventArguments['RoleData'] = &$this->RoleData;
+
+            $userRoleData = $userModel->getRoles($userID)->resultArray();
+            $this->UserRoleData = array_column($userRoleData, 'Name', 'RoleID');
+            $this->EventArguments['UserRoleData'] = &$this->UserRoleData;
+
+            $this->fireEvent("BeforeUserDelete");
+            $this->setData('CanDelete', $canDelete);
+
+            $method = in_array($method, ['delete', 'keep', 'wipe']) ? $method : '';
+            $this->Method = $method;
+            if ($method != '') {
+                $this->View = 'deleteconfirm';
+                $this->setRedirectTo('/dashboard/user');
             }
-         }
-      }
-   }
 
-   public function Merge() {
-      $this->Permission('Garden.Settings.Manage');
+            if ($this->Form->authenticatedPostBack(true) && $method != '') {
+                $userModel->deleteID(
+                    $userID,
+                    ['DeleteMethod' => $method, 'DeleteModerationInfo' => $this->Form->getFormValue('DeleteModerationInfo')]
+                );
+                $this->View = 'deletecomplete';
+            }
 
-      // This must be a postback.
-      if (!$this->Request->IsAuthenticatedPostBack()) {
-         throw ForbiddenException('GET');
-      }
+        } catch (Exception $ex) {
+            $this->Form->addError($ex);
+        }
+        $this->render();
+    }
 
-      $Validation = new Gdn_Validation();
-      $Validation->ApplyRule('OldUserID', 'ValidateRequired');
-      $Validation->ApplyRule('NewUserID', 'ValidateRequired');
-      if ($Validation->Validate($this->Request->Post())) {
-         $Result = Gdn::UserModel()->Merge(
-            $this->Request->Post('OldUserID'),
-            $this->Request->Post('NewUserID'));
-         $this->SetData($Result);
-      } else {
-         $this->Form->SetValidationResults($Validation->Results());
-      }
-      $this->Render('Blank', 'Utility');
-   }
+    public function delete2() {
+        $this->permission('Garden.Users.Delete');
 
-   /**
-    * Build URL to order users by value passed.
-    *
-    * @since 2.0.0
-    * @access protected
-    * @param string $Field Column to order users by.
-    * @return string URL of user list with orderby query appended.
-    */
-   protected function _OrderUrl($Field) {
-      $Get = Gdn::Request()->Get();
-      $Get['order'] = $Field;
-      return '/dashboard/user?'.http_build_query($Get);
-   }
+        if (!Gdn::request()->isAuthenticatedPostBack(true)) {
+            throw new Exception('Requires POST', 405);
+        }
 
-   /**
-    * Convenience function for listing users. At time of this writing, it is
-    * being used by wordpress widgets to display recently active users.
-    *
-    * @since 2.0.?
-    * @access public
-    * @param string $SortField The field to sort users with. Defaults to DateLastActive. Other options are: DateInserted, Name.
-    * @param string $SortDirection The direction to sort the users.
-    * @param int $Limit The number of users to show.
-    * @param int $Offset The offset to start listing users at.
-    */
-   public function Summary($SortField = 'DateLastActive', $SortDirection = 'desc', $Limit = 30, $Offset = 0) {
-      $this->Title(T('User Summary'));
+        $this->Form->validateRule('UserID', 'ValidateRequired');
+        $deleteType = $this->Form->getFormValue('DeleteMethod');
+        if (!in_array($deleteType, ['delete', 'keep', 'wipe'])) {
+            $this->Form->addError(t('DeleteMethod must be one of: delete, keep, wipe.'));
+        }
 
-      // Input validation
-      $SortField = !in_array($SortField, array('DateLastActive', 'DateInserted', 'Name')) ? 'DateLastActive' : $SortField;
-      $SortDirection = $SortDirection == 'asc' ? 'asc' : 'desc';
-      $Limit = is_numeric($Limit) && $Limit < 100 && $Limit > 0 ? $Limit : 30;
-      $Offset = is_numeric($Offset) ? $Offset : 0;
+        $userID = $this->Form->getFormValue('UserID');
 
-      // Get user list
-      $UserModel = new UserModel();
-      $UserData = $UserModel->GetSummary('u.'.$SortField, $SortDirection, $Limit, $Offset);
-      $this->SetData('UserData', $UserData);
+        $user = Gdn::userModel()->getID($userID, DATASET_TYPE_ARRAY);
+        if ($userID && !$user) {
+            throw notFoundException('User');
+        }
 
-      $this->MasterView = 'empty';
-      $this->Render('filenotfound', 'home');
-   }
+        if ($user['Admin'] == 2) {
+            $this->Form->addError(t('You cannot delete a system-created user.'));
+        } elseif ($user['Admin'])
+            $this->Form->addError(t('You cannot delete a super-admin.'));
 
-   public function Save() {
-      $this->Permission('Garden.Users.Edit');
-      if (!Gdn::Request()->IsPostBack())
-         throw new Exception('Requires POST', 405);
+        if ($this->Form->errorCount() == 0) {
+            Gdn::userModel()->delete($userID, [
+                'DeleteMethod' => $this->Form->getFormValue('DeleteMethod'),
+                'Log' => true]);
+            $this->setData('Result', sprintf(t('%s was deleted.'), $user['Name']));
+        }
+        $this->render('Blank', 'Utility');
+    }
 
-      $Form = new Gdn_Form();
+    /**
+     *
+     *
+     * @param $userID
+     * @throws Exception
+     */
+    public function deleteContent($userID) {
+        $this->permission('Garden.Moderation.Manage');
 
-      if ($SSOString = $Form->GetFormValue('SSOString')) {
-         $Parts = explode(' ', $SSOString);
-         $String = $Parts[0];
-         $Data = json_decode(base64_decode($String), TRUE);
-         $User = ArrayTranslate($Data, array('name' => 'Name', 'email' => 'Email', 'photourl' => 'Photo', 'client_id' => 'ClientID', 'uniqueid' => 'UniqueID'));
-      } else {
-         $User = $Form->FormValues();
-      }
+        $user = Gdn::userModel()->getID($userID);
+        if (!$user) {
+            throw notFoundException('User');
+        }
 
-      if (!isset($User['UserID']) && isset($User['UniqueID'])) {
-         // Try and find the user based on SSO.
-         $Auth = Gdn::UserModel()->GetAuthentication($User['UniqueID'], $User['ClientID']);
-         if ($Auth)
-            $User['UserID'] = $Auth['UserID'];
-      }
+        if ($this->Form->authenticatedPostBack(true)) {
+            Gdn::userModel()->deleteContent($userID, ['Log' => true]);
 
-      if (!isset($User['UserID'])) {
-         // Add some default values to make saving easier.
-         if (!isset($User['RoleID'])) {
-            $DefaultRoles = C('Garden.Registration.DefaultRoles', array());
-            $User['RoleID'] = $DefaultRoles;
-         }
+            if ($this->Request->get('Target')) {
+                $this->setRedirectTo($this->Request->get('Target'));
+            } else {
+                $this->setRedirectTo(userUrl($user));
+            }
+        } else {
+            $this->setData('Title', t('Are you sure you want to do this?'));
+        }
 
-         if (!isset($User['Password'])) {
-            $User['Password'] = md5(microtime());
-            $User['HashMethod'] = 'Random';
-         }
-      }
+        $this->setData('User', $user);
+        $this->render();
+    }
 
-      $UserID = Gdn::UserModel()->Save($User, array('SaveRoles' => isset($User['RoleID']), 'NoConfirmEmail' => TRUE));
-      if ($UserID) {
-         if (!isset($User['UserID']))
-            $User['UserID'] = $UserID;
+    /**
+     * Edit a user account.
+     *
+     * @since 2.0.0
+     * @access public
+     * @param int $userID Unique ID.
+     */
+    public function edit($userID) {
+        $this->permission('Garden.Users.Edit');
 
-         if (isset($User['ClientID']) && isset($User['UniqueID'])) {
-            Gdn::UserModel()->SaveAuthentication(array(
-               'UserID' => $User['UserID'],
-               'Provider' => $User['ClientID'],
-               'UniqueID' => $User['UniqueID']
-            ));
-         }
+        // Page setup
+        $this->addJsFile('user.js');
+        $this->title(t('Edit User'));
+        $this->setHighlightRoute('dashboard/user');
+        Gdn_Theme::section('Moderation');
 
-         $this->SetData('User', $User);
-      } else {
-         throw new Gdn_UserException(Gdn::UserModel()->Validation->ResultsText());
-      }
+        // Only admins can reassign roles
+        $roleModel = new RoleModel();
+        $allRoles = $roleModel->getArray();
+        $roleData = $roleModel->getAssignable();
 
-      $this->Render('Blank', 'Utility');
-   }
+        $userModel = new UserModel();
+        $user = $userModel->getID($userID, DATASET_TYPE_ARRAY);
 
-   public function SSO($UserID = FALSE) {
-      $this->Permission('Garden.Users.Edit');
+        // Determine if username can be edited
+        $canEditUsername = (bool)c("Garden.Profile.EditUsernames") || Gdn::session()->checkPermission('Garden.Users.Edit');
+        $this->setData('_CanEditUsername', $canEditUsername);
 
-      $ProviderModel = new Gdn_AuthenticationProviderModel();
+        // Determine if emails can be edited
+        $canEditEmail = Gdn::session()->checkPermission('Garden.Users.Edit');
+        $this->setData('_CanEditEmail', $canEditEmail);
 
-      $Form = new Gdn_Form();
+        // Decide if they have ability to confirm users
+        $confirmed = (bool)valr('Confirmed', $user);
+        $canConfirmEmail = (UserModel::requireConfirmEmail() && Gdn::session()->checkPermission('Garden.Users.Edit'));
+        $this->setData('_CanConfirmEmail', $canConfirmEmail);
+        $this->setData('_EmailConfirmed', $confirmed);
+        $user['ConfirmEmail'] = (int)$confirmed;
 
-      if ($this->Request->IsPostBack()) {
-         // Make sure everything has been posted.
-         $Form->ValidateRule('ClientID', 'ValidateRequired');
-         $Form->ValidateRule('UniqueID', 'ValidateRequired');
+        // Determine whether user being edited is privileged (can escalate permissions)
+        $userModel = new UserModel();
+        $editingPrivilegedUser = $userModel->checkPermission($user, 'Garden.Settings.Manage');
 
-         if (!ValidateRequired($Form->GetFormValue('Username')) && !ValidateRequired($Form->GetFormValue('Email'))) {
-            $Form->AddError('Username or Email is required.');
-         }
+        // Determine our password reset options
+        // Anyone with user editing my force reset over email
+        $this->ResetOptions = [
+            0 => t('Keep current password.'),
+            'Auto' => t('Force user to reset their password and send email notification.')
+        ];
+        // Only admins may manually reset passwords for other admins
+        if (checkPermission('Garden.Settings.Manage') || !$editingPrivilegedUser) {
+            $this->ResetOptions['Manual'] = t('Manually set user password. No email notification.');
+        }
 
-         $Provider = $ProviderModel->GetProviderByKey($Form->GetFormValue('ClientID'));
-         if (!$Provider) {
-            $Form->AddError(sprintf('%1$s "%2$s" not found.', T('Provider'), $Form->GetFormValue('ClientID')));
-         }
+        // Set the model on the form.
+        $this->Form->setModel($userModel);
 
-         if ($Form->ErrorCount() > 0) {
-            throw new Gdn_UserException($Form->ErrorString());
-         }
+        // Make sure the form knows which item we are editing.
+        $this->Form->addHidden('UserID', $userID);
 
-         // Grab the user.
-         $User = FALSE;
-         if ($Email = $Form->GetFormValue('Email')) {
-            $User = Gdn::UserModel()->GetByEmail($Email);
-         }
-         if (!$User && ($Username = $Form->GetFormValue('Username'))) {
-            $User = Gdn::UserModel()->GetByUsername($Username);
-         }
-         if (!$User) {
-            throw new Gdn_UserException(sprintf(T('User not found.'), strtolower(T(UserModel::SigninLabelCode()))), 404);
-         }
+        try {
+            $allowEditing = true;
+            $this->EventArguments['AllowEditing'] = &$allowEditing;
+            $this->EventArguments['TargetUser'] = &$user;
 
-         // Validate the user's password.
-         $PasswordHash = new Gdn_PasswordHash();
-         $Password = $this->Form->GetFormValue('Password', NULL);
-         if ($Password !== NULL && !$PasswordHash->CheckPassword($Password, GetValue('Password', $User), GetValue('HashMethod', $User))) {
-            throw new Gdn_UserException(T('Invalid password.'), 401);
-         }
+            // These are all the 'effective' roles for this edit action. This list can
+            // be trimmed down from the real list to allow subsets of roles to be edited.
+            $this->EventArguments['RoleData'] = &$roleData;
 
-         // Okay. We've gotten this far. Let's save the authentication.
-         $User = (array)$User;
+            $userRoleData = $userModel->getRoles($userID)->resultArray();
+            $userRoleData = array_column($userRoleData, 'Name', 'RoleID');
+            $this->EventArguments['UserRoleData'] = &$userRoleData;
 
-         Gdn::UserModel()->SaveAuthentication(array(
-            'UserID' => $User['UserID'],
-            'Provider' => $Form->GetFormValue('ClientID'),
-            'UniqueID' => $Form->GetFormValue('UniqueID')
-         ));
+            $this->fireEvent("BeforeUserEdit");
 
-         $Row = Gdn::UserModel()->GetAuthentication($Form->GetFormValue('UniqueID'), $Form->GetFormValue('ClientID'));
+            $banReversible = $user['Banned'] & (BanModel::BAN_AUTOMATIC | BanModel::BAN_MANUAL);
+            $this->setData('BanFlag', $banReversible ? $user['Banned'] : 1);
+            $this->setData('BannedOtherReasons', $user['Banned'] & ~BanModel::BAN_MANUAL);
 
-         if ($Row) {
-            $this->SetData('Result', $Row);
-         } else {
-            throw new Gdn_UserException(T('There was an error saving the data.'));
-         }
-      } else {
-         $User = Gdn::UserModel()->GetID($UserID);
-         if (!$User)
-            throw NotFoundException('User');
+            $this->Form->setData($user);
+            if ($this->Form->authenticatedPostBack(true)) {
+                // Do not re-validate or change the username if disabled or exactly the same.
+                $nameUnchanged = ($user['Name'] === $this->Form->getValue('Name'));
+                $restoreName = null;
+                if (!$canEditUsername || $nameUnchanged) {
+                    $this->Form->removeFormValue("Name");
+                    $restoreName = $user['Name'];
+                }
 
-         $Result = Gdn::SQL()
-               ->Select('ua.ProviderKey', '', 'ClientID')
-               ->Select('ua.ForeignUserKey', '', 'UniqueID')
-               ->Select('ua.UserID')
-               ->Select('p.Name')
-               ->Select('p.AuthenticationSchemeAlias', '', 'Type')
-               ->From('UserAuthentication ua')
-               ->Join('UserAuthenticationProvider p', 'ua.ProviderKey = p.AuthenticationKey')
-               ->Where('UserID', $UserID)
-               ->Get()->ResultArray();
+                // Allow mods to confirm/unconfirm emails
+                $this->Form->removeFormValue('Confirmed');
+                $confirmation = $this->Form->getFormValue('ConfirmEmail', null);
+                $confirmation = !is_null($confirmation) ? (bool)$confirmation : null;
 
-         $this->SetData('Result', $Result);
-      }
+                if ($canConfirmEmail && is_bool($confirmation)) {
+                    $this->Form->setFormValue('Confirmed', (int)$confirmation);
+                }
 
-      $this->Render('Blank', 'Utility', 'Dashboard');
-   }
+                $resetPassword = $this->Form->getValue('ResetPassword', false);
 
-   public function TagSearch($q) {
-      $Data = Gdn::UserModel()->TagSearch($q);
-      die(json_encode($Data));
-   }
+                // If we're an admin or this isn't a privileged user, allow manual setting of password
+                $allowManualReset = (checkPermission('Garden.Settings.Manage') || !$editingPrivilegedUser);
+                if ($resetPassword == 'Manual' && $allowManualReset) {
+                    // If a new password was specified, add it to the form's collection
+                    $newPassword = $this->Form->getValue('NewPassword', '');
+                    $this->Form->setFormValue('Password', $newPassword);
+                }
 
-   /**
-    * Determine whether user can register with this username.
-    *
-    * @since 2.0.0
-    * @access public
-    * @param string $Name Username to be checked.
-    */
-   public function UsernameAvailable($Name = '') {
-      $this->_DeliveryType = DELIVERY_TYPE_BOOL;
-      $Available = TRUE;
-      if (C('Garden.Registration.NameUnique', TRUE) && $Name != '') {
-         $UserModel = Gdn::UserModel();
-         if ($UserModel->GetByUsername($Name))
-            $Available = FALSE;
-      }
-      if (!$Available)
-         $this->Form->AddError(sprintf(T('%s unavailable'), T('Name')));
+                // Role changes
 
-      $this->Render();
-   }
+                // These are the new roles the editing user wishes to apply to the target
+                // user, adjusted for his ability to affect those roles
+                $requestedRoles = $this->Form->getFormValue('RoleID');
 
-   public function Verify($UserID, $Verified) {
-      $this->Permission('Garden.Moderation.Manage');
+                if (!is_array($requestedRoles)) {
+                    $requestedRoles = [];
+                }
+                $requestedRoles = array_flip($requestedRoles);
+                $userNewRoles = array_intersect_key($roleData, $requestedRoles);
 
-      if (!$this->Request->IsAuthenticatedPostBack()) {
-         throw PermissionException('Javascript');
-      }
+                // These roles will stay turned on regardless of the form submission contents
+                // because the editing user does not have permission to modify them
+                $immutableRoles = array_diff_key($allRoles, $roleData);
+                $userImmutableRoles = array_intersect_key($immutableRoles, $userRoleData);
 
-      // First, set the field value.
-      Gdn::UserModel()->SetField($UserID, 'Verified', $Verified);
+                // Apply immutable roles
+                foreach ($userImmutableRoles as $iMRoleID => $iMRoleName) {
+                    $userNewRoles[$iMRoleID] = $iMRoleName;
+                }
 
-      $User = Gdn::UserModel()->GetID($UserID);
-      if (!$User)
-         throw NotFoundException('User');
+                // Put the data back into the forum object as if the user had submitted
+                // this themselves
+                $this->Form->setFormValue('RoleID', array_keys($userNewRoles));
 
-      // Send back the verified button.
-      require_once $this->FetchViewLocation('helper_functions', 'Profile', 'Dashboard');
-      $this->JsonTarget('.User-Verified', UserVerified($User), 'ReplaceWith');
+                $banned = $this->Form->getFormValue('Banned');
+                if (!$banned) {
+                    // Checkbox was unchecked; bitmask to remove any reversible bans.
+                    if ($banReversible) {
+                        $reversedBans = ($user['Banned'] & (~(BanModel::BAN_AUTOMATIC | BanModel::BAN_MANUAL)));
+                        $this->Form->setFormValue('Banned', $reversedBans);
+                    }
+                } else {
+                    // Bitmask to add a manual ban.
+                    $this->Form->setFormValue('Banned', $user['Banned'] | BanModel::BAN_MANUAL);
+                }
 
-      $this->Render('Blank', 'Utility', 'Dashboard');
-   }
+                if ($this->Form->save(['SaveRoles' => true, 'ValidateName' => false]) !== false) {
+                    if ($this->Form->getValue('ResetPassword', '') == 'Auto') {
+                        $userModel->passwordRequest($user['Email']);
+                        $userModel->setField($userID, 'HashMethod', 'Reset');
+                    }
+
+                    $this->informMessage(t('Your changes have been saved.'));
+                } else {
+                    // We unset the form value on save when username is not edited or user can't edit this field.
+                    // On error we need to reset the field to the original value otherwise the field is empty.
+                    if (!is_null($restoreName)) {
+                        $this->Form->setFormValue("Name", $restoreName);
+                    }
+                }
+
+                $userRoleData = $userNewRoles;
+            }
+        } catch (Exception $ex) {
+            $this->Form->addError($ex);
+        }
+
+        if (!$allowEditing) {
+            deprecated('The `AllowEditing` event parameter', '', 'March 2017');
+        }
+
+        $this->setData('User', $user);
+        $this->setData('Roles', $roleData);
+        $this->setData('UserRoles', $userRoleData);
+
+        $this->render();
+    }
+
+    /**
+     * Determine whether user can register with this email address.
+     *
+     * @since 2.0.0
+     * @access public
+     * @param string $email Email address to be checked.
+     */
+    public function emailAvailable($email = '') {
+        $this->verifyGuestSearchAllowed(true);
+
+        $this->_DeliveryType = DELIVERY_TYPE_BOOL;
+        $available = true;
+
+        if (c('Garden.Registration.EmailUnique', true) && $email != '') {
+            $userModel = Gdn::userModel();
+            if ($userModel->getByEmail($email)) {
+                $available = false;
+            }
+        }
+        if (!$available) {
+            $this->Form->addError(sprintf(t('%s unavailable'), t('Email')));
+        }
+
+        $this->render();
+    }
+
+    /**
+     * Get filter from current request.
+     *
+     * @since 2.0.0
+     * @access protected
+     */
+    protected function _getFilter() {
+        $filter = $this->Request->get('Filter');
+        if ($filter) {
+            $parts = explode(' ', $filter, 3);
+            if (count($parts) < 2) {
+                return false;
+            }
+
+            $field = $parts[0];
+            if (count($parts) == 2) {
+                $op = '=';
+                $filterValue = $parts[1];
+            } else {
+                $op = $parts[1];
+                if (!in_array($op, ['=', 'like'])) {
+                    $op = '=';
+                }
+                $filterValue = $parts[2];
+            }
+
+            // If we're using a DB function (e.g. converting binary IPs), separate it from the field.
+            if (preg_match('/^(?<function>[A-Za-z0-9_]+)\((?<fieldName>[A-Za-z0-9_\.]+)\)$/', $field, $fieldParts)) {
+                $field = $fieldParts['fieldName'];
+                $dbFunction = $fieldParts['function'];
+            }
+
+            if (strpos($field, '.') !== false) {
+                $fieldParts = explode('.', $field);
+                $field = array_pop($fieldParts);
+            }
+
+            $validFields = ['Name', 'Email', 'LastIPAddress', 'InsertIPAddress', 'RankID', 'DateFirstVisit', 'DateLastActive'];
+            if (!in_array($field, $validFields)) {
+                return false;
+            }
+
+            // If we have a valid DB function, re-apply it to the field.
+            $validDBFunctions = ['inet6_ntoa'];
+            if (isset($dbFunction) && in_array($dbFunction, $validDBFunctions)) {
+                $field = "{$dbFunction}({$field})";
+            }
+
+            return ["$field $op" => $filterValue];
+        }
+        return false;
+    }
+
+    /**
+     * Handle a user application.
+     *
+     * @since 2.0.0
+     * @access private
+     * @see UserModel::decline, UserModel::approve
+     *
+     * @param string $action Approve or Decline.
+     * @param int $userID Unique ID.
+     * @return bool Whether handling was successful.
+     */
+    private function handleApplicant($action, $userID) {
+        $this->permission('Garden.Users.Approve');
+
+        if (!in_array($action, ['Approve', 'Decline']) || !is_numeric($userID)) {
+            $this->Form->addError('ErrorInput');
+            $result = false;
+        } else {
+            $userModel = new UserModel();
+            if (is_numeric($userID)) {
+                try {
+                    $this->EventArguments['UserID'] = $userID;
+                    $this->fireEvent("Before{$action}User");
+
+                    $email = new Gdn_Email();
+                    $result = $userModel->$action($userID, $email);
+
+                    // Re-calculate applicant count
+                    $roleModel = new RoleModel();
+                    $roleModel->getApplicantCount(true);
+
+                    $this->fireEvent("After{$action}User");
+                } catch (Exception $ex) {
+                    $result = false;
+                    $this->Form->addError(strip_tags($ex->getMessage()));
+                }
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     *
+     *
+     * @throws Exception
+     * @throws Gdn_UserException
+     */
+    public function merge() {
+        $this->permission('Garden.Settings.Manage');
+
+        // This must be a postback.
+        if (!$this->Request->isAuthenticatedPostBack(true)) {
+            throw forbiddenException('GET');
+        }
+
+        $validation = new Gdn_Validation();
+        $validation->applyRule('OldUserID', 'ValidateRequired');
+        $validation->applyRule('NewUserID', 'ValidateRequired');
+        if ($validation->validate($this->Request->post())) {
+            $result = Gdn::userModel()->merge(
+                $this->Request->post('OldUserID'),
+                $this->Request->post('NewUserID')
+            );
+            $this->setData($result);
+        } else {
+            $this->Form->setValidationResults($validation->results());
+        }
+        $this->render('Blank', 'Utility');
+    }
+
+    /**
+     * Build URL to order users by value passed.
+     *
+     * @since 2.0.0
+     * @access protected
+     * @param string $field Column to order users by.
+     * @return string URL of user list with orderby query appended.
+     */
+    protected function _orderUrl($field) {
+        $get = Gdn::request()->get();
+        $get['order'] = $field;
+        return '/dashboard/user?'.http_build_query($get);
+    }
+
+
+
+    /**
+     * Convenience function for listing users. At time of this writing, it is
+     * being used by wordpress widgets to display recently active users.
+     *
+     * @since 2.0.?
+     * @access public
+     * @param string $sortField The field to sort users with. Defaults to DateLastActive. Other options are: DateInserted, Name.
+     * @param string $sortDirection The direction to sort the users.
+     * @param int $limit The number of users to show.
+     * @param int $offset The offset to start listing users at.
+     */
+    public function summary($sortField = 'DateLastActive', $sortDirection = 'desc', $limit = 30, $offset = 0) {
+        // Added permission check Oct 2014 - Guest now requires Profiles.View for WP widget to work.
+        $this->permission('Garden.Profiles.View');
+        $this->title(t('User Summary'));
+
+        // Input validation
+        $sortField = !in_array($sortField, ['DateLastActive', 'DateInserted', 'Name']) ? 'DateLastActive' : $sortField;
+        $sortDirection = $sortDirection == 'asc' ? 'asc' : 'desc';
+        $limit = is_numeric($limit) && $limit < 100 && $limit > 0 ? $limit : 30;
+        $offset = is_numeric($offset) ? $offset : 0;
+
+        // Get user list
+        $userModel = new UserModel();
+        $userData = $userModel->getSummary('u.'.$sortField, $sortDirection, $limit, $offset);
+        $this->setData('UserData', $userData);
+
+        $this->MasterView = 'empty';
+        $this->render('filenotfound', 'home');
+    }
+
+    /**
+     *
+     *
+     * @throws Exception
+     * @throws Gdn_UserException
+     */
+    public function save() {
+        $this->permission('Garden.Users.Edit');
+        if (!Gdn::request()->isAuthenticatedPostBack()) {
+            throw new Exception('Requires POST', 405);
+        }
+
+        $form = new Gdn_Form();
+
+        if ($sSOString = $form->getFormValue('SSOString')) {
+            $parts = explode(' ', $sSOString);
+            $string = $parts[0];
+            $data = json_decode(base64_decode($string), true);
+            $user = arrayTranslate($data, ['name' => 'Name', 'email' => 'Email', 'photourl' => 'Photo', 'client_id' => 'ClientID', 'uniqueid' => 'UniqueID']);
+        } else {
+            $user = $form->formValues();
+        }
+
+        if (!isset($user['UserID']) && isset($user['UniqueID'])) {
+            // Try and find the user based on SSO.
+            $auth = Gdn::userModel()->getAuthentication($user['UniqueID'], $user['ClientID']);
+            if ($auth) {
+                $user['UserID'] = $auth['UserID'];
+            }
+        }
+
+        if (!isset($user['UserID'])) {
+            // Add some default values to make saving easier.
+            if (!isset($user['RoleID'])) {
+                $defaultRoles = RoleModel::getDefaultRoles(RoleModel::TYPE_MEMBER);
+                $user['RoleID'] = $defaultRoles;
+            } elseif (is_numeric($user['RoleID'])) {
+                // UserModel->save() demands an array for RoleID.
+                $user['RoleID'] = [$user['RoleID']];
+            }
+
+            if (!isset($user['Password'])) {
+                $user['Password'] = md5(microtime());
+                $user['HashMethod'] = 'Random';
+            }
+        }
+
+        $userID = Gdn::userModel()->save($user, ['SaveRoles' => isset($user['RoleID']), 'NoConfirmEmail' => true]);
+        if ($userID) {
+            if (!isset($user['UserID'])) {
+                $user['UserID'] = $userID;
+            }
+
+            if (isset($user['ClientID']) && isset($user['UniqueID'])) {
+                Gdn::userModel()->saveAuthentication([
+                    'UserID' => $user['UserID'],
+                    'Provider' => $user['ClientID'],
+                    'UniqueID' => $user['UniqueID']
+                ]);
+            }
+
+            $this->setData('User', $user);
+        } else {
+            throw new Gdn_UserException(Gdn::userModel()->Validation->resultsText());
+        }
+
+        $this->render('Blank', 'Utility');
+    }
+
+    /**
+     *
+     *
+     * @param bool $userID
+     * @throws Exception
+     * @throws Gdn_UserException
+     */
+    public function sso($userID = false) {
+        $this->permission('Garden.Users.Edit');
+
+        $providerModel = new Gdn_AuthenticationProviderModel();
+
+        $form = new Gdn_Form();
+
+        if ($this->Request->isAuthenticatedPostBack(true)) {
+            // Make sure everything has been posted.
+            $form->validateRule('ClientID', 'ValidateRequired');
+            $form->validateRule('UniqueID', 'ValidateRequired');
+
+            if (!validateRequired($form->getFormValue('Username')) && !validateRequired($form->getFormValue('Email'))) {
+                $form->addError('Username or Email is required.');
+            }
+
+            $provider = $providerModel->getProviderByKey($form->getFormValue('ClientID'));
+            if (!$provider) {
+                $form->addError(sprintf('%1$s "%2$s" not found.', t('Provider'), $form->getFormValue('ClientID')));
+            }
+
+            if ($form->errorCount() > 0) {
+                throw new Gdn_UserException($form->errorString());
+            }
+
+            // Grab the user.
+            $user = false;
+            if ($email = $form->getFormValue('Email')) {
+                $user = Gdn::userModel()->getByEmail($email);
+            }
+            if (!$user && ($username = $form->getFormValue('Username'))) {
+                $user = Gdn::userModel()->getByUsername($username);
+            }
+            if (!$user) {
+                throw new Gdn_UserException(sprintf(t('User not found.'), strtolower(t(UserModel::signinLabelCode()))), 404);
+            }
+
+            // Validate the user's password.
+            $passwordHash = new Gdn_PasswordHash();
+            $password = $this->Form->getFormValue('Password', null);
+            if ($password !== null && !$passwordHash->checkPassword($password, val('Password', $user), val('HashMethod', $user))) {
+                throw new Gdn_UserException(t('Invalid password.'), 401);
+            }
+
+            // Okay. We've gotten this far. Let's save the authentication.
+            $user = (array)$user;
+
+            Gdn::userModel()->saveAuthentication([
+                'UserID' => $user['UserID'],
+                'Provider' => $form->getFormValue('ClientID'),
+                'UniqueID' => $form->getFormValue('UniqueID')
+            ]);
+
+            $row = Gdn::userModel()->getAuthentication($form->getFormValue('UniqueID'), $form->getFormValue('ClientID'));
+
+            if ($row) {
+                $this->setData('Result', $row);
+            } else {
+                throw new Gdn_UserException(t('There was an error saving the data.'));
+            }
+        } else {
+            $user = Gdn::userModel()->getID($userID);
+            if (!$user) {
+                throw notFoundException('User');
+            }
+
+            $result = Gdn::sql()
+                ->select('ua.ProviderKey', '', 'ClientID')
+                ->select('ua.ForeignUserKey', '', 'UniqueID')
+                ->select('ua.UserID')
+                ->select('p.Name')
+                ->select('p.AuthenticationSchemeAlias', '', 'Type')
+                ->from('UserAuthentication ua')
+                ->join('UserAuthenticationProvider p', 'ua.ProviderKey = p.AuthenticationKey')
+                ->where('UserID', $userID)
+                ->get()->resultArray();
+
+            $this->setData('Result', $result);
+        }
+
+        $this->render('Blank', 'Utility', 'Dashboard');
+    }
+
+    /**
+     * JSON output of a username search.
+     *
+     * @param string $query
+     * @param int $limit
+     */
+    public function tagSearch($q, $limit = 10) {
+        if (!empty($q)) {
+            $data = Gdn::userModel()->tagSearch($q, $limit);
+        } else {
+            $data = [];
+        }
+        $this->contentType('application/json; charset=utf-8');
+        $this->sendHeaders();
+        die(json_encode($data));
+    }
+
+    /**
+     * Determine whether user can register with this username.
+     *
+     * @since 2.0.0
+     * @access public
+     * @param string $name Username to be checked.
+     */
+    public function usernameAvailable($name = '') {
+        $this->verifyGuestSearchAllowed(true);
+
+        $this->_DeliveryType = DELIVERY_TYPE_BOOL;
+        $available = true;
+        if (c('Garden.Registration.NameUnique', true) && $name != '') {
+            $userModel = Gdn::userModel();
+            if ($userModel->getByUsername($name)) {
+                $available = false;
+            }
+        }
+        if (!$available) {
+            $this->Form->addError(sprintf(t('%s unavailable'), t('Name')));
+        }
+
+        $this->render();
+    }
+
+    /**
+     *
+     *
+     * @param $UserID
+     * @param $Verified
+     * @throws Exception
+     */
+    public function verify($UserID, $Verified) {
+        $this->permission('Garden.Moderation.Manage');
+
+        if (!$this->Request->isAuthenticatedPostBack()) {
+            throw permissionException('Javascript');
+        }
+
+        $User = Gdn::userModel()->getID($UserID);
+        if (!$User) {
+            throw notFoundException('User');
+        }
+
+        // First, set the field value.
+        Gdn::userModel()->setField($UserID, 'Verified', $Verified);
+        // Send the current $verified value to userVerified.
+        $User = (object)$User;
+        $User->Verified = $Verified;
+        // Send back the verified button.
+        require_once $this->fetchViewLocation('helper_functions', 'Profile', 'Dashboard');
+        $this->jsonTarget('.User-Verified', userVerified($User), 'ReplaceWith');
+
+        $this->render('Blank', 'Utility', 'Dashboard');
+    }
 }

@@ -1,450 +1,800 @@
-<?php if (!defined('APPLICATION')) exit();
- 
+<?php
 /**
- * Handles displaying categories.
+ * Categories controller
  *
- * @copyright Copyright 2008, 2009 Vanilla Forums Inc.
- * @license http://www.opensource.org/licenses/gpl-2.0.php GPLv2
- * @since 2.0.0
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
  * @package Vanilla
+ * @since 2.0
+ */
+
+use Vanilla\Contracts\Site\SiteSectionInterface;
+use Vanilla\Formatting\Formats\HtmlFormat;
+use Vanilla\Formatting\Html\HtmlSanitizer;
+use Vanilla\Site\DefaultSiteSection;
+use Vanilla\Site\SiteSectionModel;
+
+/**
+ * Handles displaying categories via /categoris endpoint.
  */
 class CategoriesController extends VanillaController {
-   /**
-    * Models to include.
-    * 
-    * @since 2.0.0
-    * @access public
-    * @var array
-    */
-   public $Uses = array('Database', 'Form', 'CategoryModel');
-   
-   /**
-    * @var CategoryModel 
-    */
-   public $CategoryModel;
-   
-   /**
-    * Should the discussions have their options available.
-    * 
-    * @since 2.0.0
-    * @access public
-    * @var bool
-    */
-   public $ShowOptions = TRUE;
-   
-   /**
-    * Unique identifier.
-    * 
-    * @since 2.0.0
-    * @access public
-    * @var int
-    */
-   public $CategoryID;
-   
-   /**
-    * Category object.
-    * 
-    * @since 2.0.0
-    * @access public
-    * @var object
-    */
-   public $Category;
-   
-   public function Archives($Category, $Month, $Page = FALSE) {
-      $Category = CategoryModel::Categories($Category);
-      if (!$Category)
-         throw NotFoundException($Category);
-      
-      if (!$Category['PermsDiscussionsView'])
-         throw PermissionException();
-      
-      $Timestamp = strtotime($Month);
-      if (!$Timestamp)
-         throw new Gdn_UserException("$Month is not a valid date.");
-      
-      $this->SetData('Category', $Category);
-      
-      // Round the month to the first day.
-      $From = gmdate('Y-m-01', $Timestamp);
-      $To = gmdate('Y-m-01', strtotime('+1 month', strtotime($From)));
-      
-      // Grab the discussions.
-      list($Offset, $Limit) = OffsetLimit($Page, C('Vanilla.Discussions.PerPage', 30));
-      $Where = array(
-         'CategoryID' => $Category['CategoryID'],
-         'Announce' => 'all',
-         'DateInserted >=' => $From,
-         'DateInserted <' => $To);
-      
-      $DiscussionModel = new DiscussionModel();
-      $Discussions = $DiscussionModel->GetWhere($Where, $Offset, $Limit);
-      $this->DiscussionData = $this->SetData('Discussions', $Discussions);
-      $this->SetData('_CurrentRecords', count($Discussions));
-      $this->SetData('_Limit', $Limit);
-      
-      $Canonical = '/categories/archives/'.rawurlencode($Category['UrlCode']).'/'.gmdate('Y-m', $Timestamp);
-      $Page = PageNumber($Offset, $Limit, TRUE, FALSE);
-      $this->CanonicalUrl(Url($Canonical.($Page ? '?page='.$Page : ''), TRUE));
-      
-      PagerModule::Current()->Configure($Offset, $Limit, FALSE, $Canonical.'?page={Page}');
-      
-//      PagerModule::Current()->Offset = $Offset;
-//      PagerModule::Current()->Url = '/categories/archives'.rawurlencode($Category['UrlCode']).'?page={Page}';
-      
-      Gdn_Theme::Section(GetValue('CssClass', $Category));
-      Gdn_Theme::Section('DiscussionList');
-      
-      $this->Title(htmlspecialchars(GetValue('Name', $Category, '')));
-      $this->Description(sprintf(T("Archives for %s"), gmdate('F Y', strtotime($From))), TRUE);
-      $this->AddJsFile('discussions.js');
-      $this->Head->AddTag('meta', array('name' => 'robots', 'content' => 'noindex'));
 
-      $this->ControllerName = 'DiscussionsController';
-      $this->CssClass = 'Discussions';
-      
-      $this->Render();
-   }
-   
-   /**
-    * "Table" layout for categories. Mimics more traditional forum category layout.
-    */
-   public function Table($Category = '') {
-      if ($this->SyndicationMethod == SYNDICATION_NONE) {
-         $this->View = 'table';
-      } else
-         $this->View = 'all';
-      $this->All($Category);
-   }
-   
-   /**
-    * Show all discussions in a particular category.
-    * 
-    * @since 2.0.0
-    * @access public
-    * 
-    * @param string $CategoryIdentifier Unique category slug or ID.
-    * @param int $Offset Number of discussions to skip.
-    */
-   public function Index($CategoryIdentifier = '', $Page = '0') {
-      // Figure out which category layout to choose (Defined on "Homepage" settings page).
-      $Layout = C('Vanilla.Categories.Layout');
-      
-      if ($CategoryIdentifier == '') {
-         switch($Layout) {
-            case 'mixed':
-               $this->View = 'discussions';
-               $this->Discussions();
-               break;
-            case 'table':
-               $this->Table();
-               break;
+    /** @var array Models to include.*/
+    public $Uses = ['Database', 'Form', 'CategoryModel'];
+
+    /** @var CategoryModel */
+    public $CategoryModel;
+
+    /**  @var bool Should the discussions have their options available. */
+    public $ShowOptions = true;
+
+    /** @var int Unique identifier. */
+    public $CategoryID;
+
+    /** @var object Category object. */
+    public $Category;
+
+    /** @var bool Value indicating if the category-following filter should be displayed when rendering a view */
+    public $enableFollowingFilter = false;
+
+
+    /**
+     * @var \Closure $categoriesCompatibilityCallback A backwards-compatible callback to get `$this->data('Categories')`.
+     */
+    private $categoriesCompatibilityCallback;
+
+    /**
+     *
+     *
+     * @param $category
+     * @param $month
+     * @param bool $page
+     * @throws Exception
+     * @throws Gdn_UserException
+     */
+    public function archives($category, $month, $page = false) {
+        $category = CategoryModel::categories($category);
+        if (!$category) {
+            throw notFoundException('Category');
+        }
+
+        if (!$category['PermsDiscussionsView']) {
+            throw permissionException();
+        }
+
+        $timestamp = strtotime($month);
+        if (!$timestamp) {
+            throw new Gdn_UserException("The archive month is not a valid date.");
+        }
+
+        $this->setData('Category', $category);
+
+        // Round the month to the first day.
+        $from = gmdate('Y-m-01', $timestamp);
+        $to = gmdate('Y-m-01', strtotime('+1 month', strtotime($from)));
+
+        // Grab the discussions.
+        list($offset, $limit) = offsetLimit($page, c('Vanilla.Discussions.PerPage', 30));
+        $where = [
+            'CategoryID' => $category['CategoryID'],
+            'Announce' => 'all',
+            'DateInserted >=' => $from,
+            'DateInserted <' => $to];
+
+        saveToConfig('Vanilla.Discussions.SortField', 'd.DateInserted', false);
+        $discussionModel = new DiscussionModel();
+        $discussionModel->setSort(Gdn::request()->get());
+        $discussionModel->setFilters(Gdn::request()->get());
+        $this->setData('Sort', $discussionModel->getSort());
+        $this->setData('Filters', $discussionModel->getFilters());
+        $discussions = $discussionModel->getWhereRecent($where, $limit, $offset);
+        $this->DiscussionData = $this->setData('Discussions', $discussions);
+        $this->setData('_CurrentRecords', count($discussions));
+        $this->setData('_Limit', $limit);
+
+        $canonical = '/categories/archives/'.rawurlencode($category['UrlCode']).'/'.gmdate('Y-m', $timestamp);
+        $page = pageNumber($offset, $limit, true, false);
+        $this->canonicalUrl(url($canonical.($page ? '?page='.$page : ''), true));
+
+        PagerModule::current()->configure($offset, $limit, false, $canonical.'?page={Page}');
+
+//      PagerModule::current()->Offset = $Offset;
+//      PagerModule::current()->Url = '/categories/archives'.rawurlencode($Category['UrlCode']).'?page={Page}';
+
+        Gdn_Theme::section(val('CssClass', $category));
+        Gdn_Theme::section('DiscussionList');
+
+        $this->title(Gdn::formatService()->renderPlainText(val('Name', $category, ''), HtmlFormat::FORMAT_KEY));
+        $this->description(sprintf(t("Archives for %s"), gmdate('F Y', strtotime($from))), true);
+        $this->addJsFile('discussions.js');
+        $this->Head->addTag('meta', ['name' => 'robots', 'content' => 'noindex']);
+
+        $this->ControllerName = 'DiscussionsController';
+        $this->CssClass = 'Discussions';
+
+        $this->render();
+    }
+
+    /**
+     * Build a structured tree of children for the specified category.
+     *
+     * @param int|string|object|array|null $category Category or code/ID to build the tree for. Null for all.
+     * @param string|null $displayAs What display should the tree be configured for?
+     * @param bool $recent Join in recent record info?
+     * @param bool $watching Filter categories by "watching" status?
+     * @return array
+     */
+    private function getCategoryTree($category = null, $displayAs = null, $recent = false, $watching = false) {
+        $categoryIdentifier = null;
+
+        if (is_string($category) || is_numeric($category)) {
+            $category = CategoryModel::categories($category);
+        }
+
+        if ($category) {
+            if ($displayAs === null) {
+                $displayAs = val('DisplayAs', $category, 'Discussions');
+            }
+            $categoryIdentifier = val('CategoryID', $category, null);
+        }
+
+        switch ($displayAs) {
+            case 'Flat':
+                $perPage = c('Vanilla.Categories.PerPage', 30);
+                $page = Gdn::request()->get('Page', Gdn::request()->get('page', null));
+                list($offset, $limit) = offsetLimit($page, $perPage);
+                $categoryTree = $this->CategoryModel->getTreeAsFlat($categoryIdentifier, $offset, $limit);
+                $this->setData('_Limit', $perPage);
+                $this->setData('_CurrentRecords', count($categoryTree));
+                break;
+            case 'Categories':
+            case 'Discussions':
+            case 'Default':
+            case 'Nested':
             default:
-               $this->View = 'all';
-               $this->All();
-               break;
-         }
-         return;
-      } else {
-         $Category = CategoryModel::Categories($CategoryIdentifier);
-         
-         if (empty($Category)) {
-            
-            // Try lowercasing before outright failing
-            $LowerCategoryIdentifier = strtolower($CategoryIdentifier);
-            if ($LowerCategoryIdentifier != $CategoryIdentifier) {
-               $Category = CategoryModel::Categories($LowerCategoryIdentifier);
-               if ($Category) {
-                  Redirect("/categories/{$LowerCategoryIdentifier}", 301);
-               }
+            $categoryTree = $this->CategoryModel
+                    ->setJoinUserCategory(true)
+                    ->getChildTree(
+                        $categoryIdentifier ?: null,
+                        ['depth' => CategoryModel::instance()->getMaxDisplayDepth() ?: 10]
+                    );
+        }
+
+        if ($recent) {
+            $this->CategoryModel->joinRecent($categoryTree);
+        }
+
+        return $categoryTree;
+    }
+
+    /**
+     * Get a flattened tree representing the current user's followed categories.
+     *
+     * @param bool $recent Include recent post information?
+     * @param array|null $filterIDs An array of category IDs. Filter result to a subset of these categories.
+     * @return array
+     */
+    private function getFollowed($recent = false, $filterIDs = null) {
+        if ($filterIDs !== null && !is_array($filterIDs)) {
+            throw new InvalidArgumentException('Filter IDs must be in an array.');
+        }
+
+        $perPage = c('Vanilla.Categories.PerPage', 30);
+        $page = Gdn::request()->get(
+            'Page',
+            Gdn::request()->get('page', null)
+        );
+        list($offset, $limit) = offsetLimit($page, $perPage);
+
+        $where = ['Followed' => true];
+
+        if (!empty($filterIDs)) {
+            $where['CategoryID'] = $filterIDs;
+        }
+
+        $result = $this->CategoryModel
+            ->getWhere($where, '', 'asc', $limit, $offset)
+            ->resultArray();
+        $result = $this->CategoryModel->flattenCategories($result);
+
+        if ($recent) {
+            $this->CategoryModel->joinRecent($result);
+        }
+
+        $this->setData('_Limit', $perPage);
+        $this->setData('_CurrentRecords', count($result));
+
+        return $result;
+    }
+
+    /**
+     * "Table" layout for categories. Mimics more traditional forum category layout.
+     *
+     * @param string $category
+     * @param string $displayAs
+     */
+    public function table($category = '', $displayAs = '') {
+        if ($this->SyndicationMethod == SYNDICATION_NONE) {
+            $this->View = $displayAs === 'Flat' ? 'flat_table' : 'table';
+        } else {
+            $this->View = $displayAs === 'Flat' ? 'flat_all' : 'all';
+        }
+        $this->all($category, $displayAs);
+    }
+
+    /**
+     * Endpoint that returns a flattened list of children categories in JSON format. Collapses the categories,
+     * so we only retrieve the child categories that are not nested under a nested or flat category.
+     * Includes the category options that appear in the category settings dropdown in the response.
+     *
+     * @param int $parentID The ID of the parent to retrieve categories under.
+     */
+    public function getFlattenedChildren($parentID = -1) {
+        $options = ['maxdepth' => 10, 'collapsecategories' => true];
+        $categories = $this->CategoryModel->getChildTree($parentID, $options);
+        $categories = $this->CategoryModel->flattenTree($categories);
+
+        foreach ($categories as &$category) {
+            $category['Options'] = $this->getOptions($category);
+        }
+
+        $this->setData('Categories', $categories);
+        $this->deliveryType(DELIVERY_TYPE_DATA);
+        $this->deliveryMethod(DELIVERY_METHOD_JSON);
+        $this->render('blank', 'utility', 'dashboard');
+    }
+
+    /**
+     * Returns an array representation of the dropdown object, ready to add to a data array.
+     *
+     * @param array|object $category The category to retrieve the dropdown options for.
+     * @return array
+     */
+    private function getOptions($category) {
+        $cdd = CategoryModel::getCategoryDropdown($category);
+        return $cdd->toArray();
+    }
+
+
+    /**
+     * Show all discussions in a particular category.
+     *
+     * @since 2.0.0
+     * @access public
+     *
+     * @param string $categoryIdentifier Unique category slug or ID.
+     * @param int $offset Number of discussions to skip.
+     */
+    public function index($categoryIdentifier = '', $page = '0') {
+        if (!$categoryIdentifier) {
+            /** @var SiteSectionInterface $siteSection */
+            $siteSection = Gdn::getContainer()->get(SiteSectionModel::class)->getCurrentSiteSection();
+            if (!($siteSection instanceof DefaultSiteSection)) {
+                $categoryIdentifier = $siteSection->getAttributes()['categoryID'] ?? '';
             }
-            throw NotFoundException();
-         }
-         $Category = (object)$Category;
-         Gdn_Theme::Section($Category->CssClass);
-         
-         // Load the breadcrumbs.
-			$this->SetData('Breadcrumbs', CategoryModel::GetAncestors(GetValue('CategoryID', $Category)));
-         
-         $this->SetData('Category', $Category, TRUE);
-         
-         $this->Title(htmlspecialchars(GetValue('Name', $Category, '')));
-         $this->Description(GetValue('Description', $Category), TRUE);
-         
-         
-         if ($Category->DisplayAs == 'Categories') {
-            if (GetValue('Depth', $Category) > 0) {
-               // Headings don't make sense if we've cascaded down one level.
-               SaveToConfig('Vanilla.Categories.DoHeadings', FALSE, FALSE);
+        }
+
+        // Figure out which category layout to choose (Defined on "Homepage" settings page).
+        $layout = c('Vanilla.Categories.Layout');
+
+        if ($this->CategoryModel->followingEnabled()) {
+            // Only use the following filter on the root category level.
+            $this->enableFollowingFilter = $categoryIdentifier === '';
+            $this->fireEvent('EnableFollowingFilter', [
+                'CategoryIdentifier' => $categoryIdentifier,
+                'EnableFollowingFilter' => &$this->enableFollowingFilter
+            ]);
+
+            $saveFollowing = Gdn::request()->get('save') && Gdn::session()->validateTransientKey(Gdn::request()->get('TransientKey', ''));
+            $followed = paramPreference(
+                'followed',
+                'FollowedCategories',
+                'Vanilla.SaveFollowingPreference',
+                null,
+                $saveFollowing
+            );
+        } else {
+            $this->enableFollowingFilter = $followed = false;
+        }
+        $this->setData('EnableFollowingFilter', $this->enableFollowingFilter);
+        $this->setData('Followed', $followed);
+
+        if ($categoryIdentifier == '') {
+            switch ($layout) {
+                case 'mixed':
+                    $this->View = 'discussions';
+                    $this->discussions();
+                    break;
+                case 'table':
+                    $this->table();
+                    break;
+                default:
+                    $this->View = 'all';
+                    $this->all('', CategoryModel::getRootDisplayAs());
+                    break;
             }
-            
-            Trace($this->DeliveryMethod(), 'delivery method');
-            Trace($this->DeliveryType(), 'delivery type');
-            Trace($this->SyndicationMethod, 'syndication');
-            
-            if ($this->SyndicationMethod != SYNDICATION_NONE) {
-               // RSS can't show a category list so just tell it to expand all categories.
-               SaveToConfig('Vanilla.ExpandCategories', TRUE, FALSE);
+            return;
+        } else {
+            CategoryModel::instance()->setJoinUserCategory(true);
+            $category = CategoryModel::categories($categoryIdentifier);
+
+            if (empty($category)) {
+                throw notFoundException();
+            }
+            $category = (object)$category;
+
+            // Check permission
+            $this->permission('Vanilla.Discussions.View', true, 'Category', val('PermissionCategoryID', $category));
+
+            Gdn_Theme::section($category->CssClass);
+
+            // Load the breadcrumbs.
+            $this->setData('Breadcrumbs', CategoryModel::getAncestors(val('CategoryID', $category)));
+
+            $this->setData('Category', $category, true);
+
+            $this->title(Gdn::formatService()->renderPlainText(val('Name', $category, ''), HtmlFormat::FORMAT_KEY));
+
+            $this->description(val('Description', $category), false);
+
+            switch ($category->DisplayAs) {
+                case 'Flat':
+                case 'Heading':
+                case 'Categories':
+                    $stopHeadings = val('Depth', $category) > CategoryModel::instance()->getNavDepth();
+                    CategoryModel::instance()->setStopHeadingsCalculation($stopHeadings);
+                    if ($this->SyndicationMethod != SYNDICATION_NONE) {
+                        // RSS can't show a category list so just tell it to expand all categories.
+                        saveToConfig('Vanilla.ExpandCategories', true, false);
+                    } else {
+                        // This category is an overview style category and displays as a category list.
+                        switch ($layout) {
+                            case 'mixed':
+                                $this->View = 'discussions';
+                                $this->discussions($categoryIdentifier);
+                                break;
+                            case 'table':
+                                $this->table($categoryIdentifier, $category->DisplayAs);
+                                break;
+                            default:
+                                $this->View = 'all';
+                                $this->all($categoryIdentifier, $category->DisplayAs);
+                                break;
+                        }
+                        return;
+                    }
+                    break;
+            }
+
+            Gdn_Theme::section('DiscussionList');
+            // Figure out which discussions layout to choose (Defined on "Homepage" settings page).
+            $layout = c('Vanilla.Discussions.Layout');
+            switch ($layout) {
+                case 'table':
+                    if ($this->SyndicationMethod == SYNDICATION_NONE) {
+                        $this->View = 'table';
+                    }
+                    break;
+                default:
+                    // $this->View = 'index';
+                    break;
+            }
+
+            $this->setData('CategoryTree', $this->getCategoryTree(
+                $categoryIdentifier, val('DisplayAs', $category)
+            ));
+
+            // Add a backwards-compatibility shim for the old categories.
+            $this->categoriesCompatibilityCallback = function () use ($categoryIdentifier) {
+                $categories = CategoryModel::getSubtree($categoryIdentifier, false);
+                return $categories;
+            };
+
+            // Setup head
+            $this->Menu->highlightRoute('/discussions');
+            if ($this->Head) {
+                $this->addJsFile('discussions.js');
+                $this->Head->addRss(categoryUrl($category) . '/feed.rss', $this->Head->title());
+            }
+
+            // Set CategoryID
+            $categoryID = val('CategoryID', $category);
+            $this->setData('CategoryID', $categoryID, true);
+
+            // Add modules
+            $this->addModule('NewDiscussionModule');
+            $this->addModule('DiscussionFilterModule');
+            $this->addModule('CategoriesModule');
+            $this->addModule('BookmarkedModule');
+            $this->addModule('TagModule');
+
+            // Get a DiscussionModel
+            $discussionModel = new DiscussionModel();
+            $discussionModel->setSort(Gdn::request()->get());
+            $discussionModel->setFilters(Gdn::request()->get());
+            $this->setData('Sort', $discussionModel->getSort());
+            $this->setData('Filters', $discussionModel->getFilters());
+
+            $categoryIDs = [$categoryID];
+            if (c('Vanilla.ExpandCategories')) {
+                $categoryIDs = array_merge($categoryIDs, array_column($this->data('Categories'), 'CategoryID'));
+            }
+            $wheres = ['d.CategoryID' => $categoryIDs];
+            $this->setData('_ShowCategoryLink', count($categoryIDs) > 1);
+
+            // Check permission.
+            $this->categoryPermission($category, 'Vanilla.Discussions.View');
+
+            // Set discussion meta data.
+            $this->EventArguments['PerPage'] = c('Vanilla.Discussions.PerPage', 30);
+            $this->fireEvent('BeforeGetDiscussions');
+            list($offset, $limit) = offsetLimit($page, $this->EventArguments['PerPage']);
+            if (!is_numeric($offset) || $offset < 0) {
+                $offset = 0;
+            }
+
+            $page = pageNumber($offset, $limit);
+
+            // Allow page manipulation
+            $this->EventArguments['Page'] = &$page;
+            $this->EventArguments['Offset'] = &$offset;
+            $this->EventArguments['Limit'] = &$limit;
+            $this->fireEvent('AfterPageCalculation');
+
+            // We want to limit the number of pages on large databases because requesting a super-high page can kill the db.
+            $maxPages = c('Vanilla.Categories.MaxPages');
+            if ($maxPages && $page > $maxPages) {
+                throw notFoundException();
+            }
+
+            $countDiscussions = $discussionModel->getCount($wheres);
+            $this->checkPageRange($offset, $countDiscussions);
+
+            if ($maxPages && $maxPages * $limit < $countDiscussions) {
+                $countDiscussions = $maxPages * $limit;
+            }
+
+            $this->setData('CountDiscussions', $countDiscussions);
+            $this->setData('_Limit', $limit);
+
+            // We don't wan't child categories in announcements.
+            $wheres['d.CategoryID'] = $categoryID;
+            $announceData = $offset == 0 ? $discussionModel->getAnnouncements($wheres) : false;
+            $this->AnnounceData = $this->setData('Announcements', $announceData !== false ? $announceData : [], true);
+            $wheres['d.CategoryID'] = $categoryIDs;
+
+            // RSS should include announcements.
+            if ($this->SyndicationMethod !== SYNDICATION_NONE) {
+                $wheres['Announce'] = 'all';
+            }
+
+            $this->DiscussionData = $this->setData('Discussions', $discussionModel->getWhereRecent($wheres, $limit, $offset));
+
+            // Build a pager
+            $pagerFactory = new Gdn_PagerFactory();
+            $url = categoryUrl($categoryIdentifier);
+
+            $this->EventArguments['PagerType'] = 'Pager';
+            $this->fireEvent('BeforeBuildPager');
+            if (!$this->data('_PagerUrl')) {
+                $this->setData('_PagerUrl', $url.'/{Page}');
+            }
+            $queryString = DiscussionModel::getSortFilterQueryString($discussionModel->getSort(), $discussionModel->getFilters());
+            $this->setData('_PagerUrl', $this->data('_PagerUrl').$queryString);
+
+            $this->Pager = $pagerFactory->getPager($this->EventArguments['PagerType'], $this);
+            $this->Pager->ClientID = 'Pager';
+            $this->Pager->configure(
+                $offset,
+                $limit,
+                $countDiscussions,
+                $this->data('_PagerUrl')
+            );
+
+            $this->Pager->Record = $category;
+            PagerModule::current($this->Pager);
+            $this->setData('_Page', $page);
+            $this->setData('_Limit', $limit);
+            $this->fireEvent('AfterBuildPager');
+
+            // Set the canonical Url.
+            $this->canonicalUrl(categoryUrl($category, pageNumber($offset, $limit)));
+
+            // Change the controller name so that it knows to grab the discussion views
+            $this->ControllerName = 'DiscussionsController';
+            // Pick up the discussions class
+            $this->CssClass = 'Discussions Category-'.val('UrlCode', $category);
+
+            // Deliver JSON data if necessary
+            if ($this->_DeliveryType != DELIVERY_TYPE_ALL) {
+                $this->setJson('LessRow', $this->Pager->toString('less'));
+                $this->setJson('MoreRow', $this->Pager->toString('more'));
+                $this->View = 'discussions';
+            }
+            // Render default view.
+            $this->fireEvent('BeforeCategoriesRender');
+            $this->render();
+        }
+    }
+
+    /**
+     * Show all (nested) categories.
+     *
+     * @param string $Category The url code of the parent category.
+     * @param string $displayAs
+     * @since 2.0.17
+     * @access public
+     */
+    public function all($Category = '', $displayAs = '') {
+        // Setup head.
+        $this->Menu->highlightRoute('/discussions');
+        if (!$this->title()) {
+            $Title = Gdn::formatService()->renderPlainText(c('Garden.HomepageTitle'), HtmlFormat::FORMAT_KEY);
+            if ($Title) {
+                $this->title($Title, '');
             } else {
-               // This category is an overview style category and displays as a category list.
-               switch($Layout) {
-                  case 'mixed':
-                     $this->View = 'discussions';
-                     $this->Discussions();
-                     break;
-                  case 'table':
-                     $this->Table($CategoryIdentifier);
-                     break;
-                  default:
-                     $this->View = 'all';
-                     $this->All($CategoryIdentifier);
-                     break;
-               }
-               return;
+                $this->title(t('All Categories'));
             }
-         }
-         
-         Gdn_Theme::Section('DiscussionList');
-         // Figure out which discussions layout to choose (Defined on "Homepage" settings page).
-         $Layout = C('Vanilla.Discussions.Layout');
-         switch($Layout) {
-            case 'table':
-               if ($this->SyndicationMethod == SYNDICATION_NONE)
-                  $this->View = 'table';
-               break;
+        }
+        Gdn_Theme::section('CategoryList');
+
+        if (!$Category) {
+            $this->description(Gdn::formatService()->renderPlainText(c('Garden.Description', ''), HtmlFormat::FORMAT_KEY));
+        }
+
+        $this->setData('Breadcrumbs', CategoryModel::getAncestors(val('CategoryID', $this->data('Category'))));
+
+        // Set the category follow toggle before we load category data so that it affects the category query appropriately.
+        $CategoryFollowToggleModule = new CategoryFollowToggleModule($this);
+        $CategoryFollowToggleModule->setToggle();
+
+        // Get category data
+        $this->CategoryModel->Watching = !Gdn::session()->getPreference('ShowAllCategories');
+
+        if ($Category) {
+            $this->setData('Category', CategoryModel::categories($Category));
+
+            $this->categoriesCompatibilityCallback = function () use ($Category) {
+                $Subtree = CategoryModel::getSubtree($Category, false);
+                $CategoryIDs = array_column($Subtree, 'CategoryID');
+                return $this->CategoryModel->getFull($CategoryIDs)->resultArray();
+            };
+        } else {
+            $this->categoriesCompatibilityCallback = function () {
+                return $this->CategoryModel->getFull()->resultArray();
+            };
+        }
+
+        if ($this->data('Followed')) {
+            if ($Category) {
+                $ancestor = CategoryModel::categories($Category);
+                if (empty($ancestor)) {
+                    throw new Gdn_UserException("Invalid category ID: {$Category}");
+                }
+                $tree = $this->CategoryModel->getTree($ancestor['CategoryID']);
+                $flatTree = CategoryModel::flattenTree($tree);
+                $filterIDs = array_column($flatTree, 'CategoryID');
+            } else {
+                $filterIDs = null;
+            }
+            $categoryTree = $this->getFollowed(true, $filterIDs);
+        } else {
+            $categoryTree = $this->getCategoryTree(
+                $Category ?: -1,
+                $Category ? null : CategoryModel::getRootDisplayAs(),
+                true,
+                true
+            );
+        }
+
+        $this->setData('CategoryTree', $categoryTree);
+
+        // Add modules
+        $this->addModule('NewDiscussionModule');
+        $this->addModule('DiscussionFilterModule');
+        $this->addModule('BookmarkedModule');
+        $this->addModule('CategoriesModule');
+        $this->addModule($CategoryFollowToggleModule);
+        $this->addModule('TagModule');
+
+        $canonicalUrl = $this->calculateCanonicalUrl($this->Data);
+        $this->canonicalUrl($canonicalUrl);
+
+        if ($this->View === 'all' && $displayAs === 'Flat') {
+            $this->View = 'flat_all';
+        }
+
+        $Location = $this->fetchViewLocation('helper_functions', 'categories', false, false);
+        if ($Location) {
+            include_once $Location;
+        }
+        $this->render();
+    }
+
+    /**
+     * Show all categories and few discussions from each.
+     *
+     * @param string $Category The url code of the parent category.
+     * @since 2.0.0
+     * @access public
+     */
+    public function discussions($Category = '') {
+        // Setup head
+        $this->addJsFile('discussions.js');
+        $this->Menu->highlightRoute('/discussions');
+
+        if (!$this->title()) {
+            $Title = Gdn::formatService()->renderPlainText(c('Garden.HomepageTitle'), HtmlFormat::FORMAT_KEY);
+            if ($Title) {
+                $this->title($Title, '');
+            } else {
+                $this->title(t('All Categories'));
+            }
+        }
+
+        if (!$Category) {
+            $this->description(Gdn::formatService()->renderPlainText(c('Garden.Description', ''), HtmlFormat::FORMAT_KEY));
+        }
+
+        Gdn_Theme::section('CategoryDiscussionList');
+
+        // Set the category follow toggle before we load category data so that it affects the category query appropriately.
+        $CategoryFollowToggleModule = new CategoryFollowToggleModule($this);
+        $CategoryFollowToggleModule->setToggle();
+
+        //$this->CategoryModel->Watching = !Gdn::session()->getPreference('ShowAllCategories');
+
+        if ($Category) {
+            $Subtree = CategoryModel::getSubtree($Category, false);
+            $CategoryIDs = array_column($Subtree, 'CategoryID');
+            $Categories = $this->CategoryModel->getFull($CategoryIDs)->resultArray();
+        } elseif ($this->data('Followed')) {
+            $Categories = $this->CategoryModel->getWhere(['Followed' => true])->resultArray();
+            $Categories = array_column($Categories, null, 'CategoryID');
+            $Categories = $this->CategoryModel->flattenCategories($Categories);
+        } else {
+            $Categories = $this->CategoryModel->getFull()->resultArray();
+        }
+
+        $this->setData('Categories', $Categories);
+
+        // Get category data and discussions
+        $this->DiscussionsPerCategory = c('Vanilla.Discussions.PerCategory', 5);
+        $DiscussionModel = new DiscussionModel();
+        $DiscussionModel->setSort(Gdn::request()->get());
+        $DiscussionModel->setFilters(Gdn::request()->get());
+        $this->setData('Sort', $DiscussionModel->getSort());
+        $this->setData('Filters', $DiscussionModel->getFilters());
+
+        $this->CategoryDiscussionData = [];
+        $Discussions = [];
+
+        foreach ($this->CategoryData->result() as $Category) {
+            if ($Category->CategoryID > 0 && $Category->CountDiscussions > 0) {
+                $this->CategoryDiscussionData[$Category->CategoryID] = $DiscussionModel->get(0, $this->DiscussionsPerCategory, ['d.CategoryID' => $Category->CategoryID, 'Announce' => 'all']);
+
+                $Discussions = array_merge(
+                    $Discussions,
+                    $this->CategoryDiscussionData[$Category->CategoryID]->resultObject()
+                );
+            }
+        }
+        $this->setData('Discussions', $Discussions);
+
+        // Add modules
+        $this->addModule('NewDiscussionModule');
+        $this->addModule('DiscussionFilterModule');
+        $this->addModule('CategoriesModule');
+        $this->addModule('BookmarkedModule');
+        $this->addModule($CategoryFollowToggleModule);
+
+        // Set view and render
+        $this->View = 'discussions';
+
+        $canonicalUrl = $this->calculateCanonicalUrl($this->Data);
+        $this->canonicalUrl($canonicalUrl);
+
+        $Path = $this->fetchViewLocation('helper_functions', 'discussions', false, false);
+        if ($Path) {
+            include_once $Path;
+        }
+
+        // For GetOptions function
+        $Path2 = $this->fetchViewLocation('helper_functions', 'categories', false, false);
+        if ($Path2) {
+            include_once $Path2;
+        }
+        $this->render();
+    }
+
+    public function __get($name) {
+        switch ($name) {
+            case 'CategoryData':
+//            deprecated('CategoriesController->CategoryData', "CategoriesController->data('Categories')");
+                $this->CategoryData = new Gdn_DataSet($this->data('Categories'), DATASET_TYPE_ARRAY);
+                $this->CategoryData->datasetType(DATASET_TYPE_OBJECT);
+                return $this->CategoryData;
+        }
+    }
+
+    /**
+     * Highlight route.
+     *
+     * Always called by dispatcher before controller's requested method.
+     *
+     * @since 2.0.0
+     * @access public
+     */
+    public function initialize() {
+        parent::initialize();
+        if (!c('Vanilla.Categories.Use')) {
+            redirectTo('/discussions');
+        }
+        if ($this->Menu) {
+            $this->Menu->highlightRoute('/categories');
+        }
+
+        $this->CountCommentsPerPage = c('Vanilla.Comments.PerPage', 30);
+
+        /**
+         * The default Cache-Control header does not include no-store, which can cause issues with outdated category
+         * information (e.g. counts).  The same check is performed here as in Gdn_Controller before the Cache-Control
+         * header is added, but this value includes the no-store specifier.
+         */
+        if (Gdn::session()->isValid()) {
+            $this->setHeader('Cache-Control', 'private, no-cache, no-store, max-age=0, must-revalidate');
+        }
+    }
+
+    public function tree($category = '') {
+        $tree = CategoryModel::instance()->getChildTree($category);
+        $this->setData('Categories', $tree);
+        $this->render('blank', 'utility', 'dashboard');
+    }
+
+    /**
+     * Returns the full list of categories for the APIv1.
+     */
+    public function apiV1List() {
+        $categories = CategoryModel::categories();
+
+        // Purge the root category, if present.
+        if (val(-1, $categories)) {
+            unset($categories[-1]);
+        }
+
+        $this->setData('Categories', $categories);
+        $this->render('blank', 'utility', 'dashboard');
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function data($path, $default = '') {
+        if (isset($this->Data[$path])) {
+            return $this->Data[$path];
+        }
+
+        switch ($path) {
+            case 'Categories':
+                if ($this->categoriesCompatibilityCallback instanceof \Closure) {
+                    deprecated('Categories', 'CategoryTree');
+                    $this->Data['Categories'] = $categories = call_user_func($this->categoriesCompatibilityCallback);
+                    return $categories;
+                }
+                return $default;
             default:
-               // $this->View = 'index';
-               break;
-         }
-         
-         // Load the subtree.
-         if (C('Vanilla.ExpandCategories'))
-            $Categories = CategoryModel::GetSubtree($CategoryIdentifier);
-         else
-            $Categories = array($Category);
-         
-         $this->SetData('Categories', $Categories);
-   
-         // Setup head
-         $this->AddCssFile('vanilla.css');
-         $this->Menu->HighlightRoute('/discussions');
-         if ($this->Head) {
-            $this->AddJsFile('discussions.js');
-            $this->Head->AddRss($this->SelfUrl.'/feed.rss', $this->Head->Title());
-         }
-         
-         // Set CategoryID
-         $CategoryID = GetValue('CategoryID', $Category);
-         $this->SetData('CategoryID', $CategoryID, TRUE);
-         
-         // Add modules
-         $this->AddModule('NewDiscussionModule');
-         $this->AddModule('DiscussionFilterModule');
-         $this->AddModule('CategoriesModule');
-         $this->AddModule('BookmarkedModule');
-         
-         // Get a DiscussionModel
-         $DiscussionModel = new DiscussionModel();
-         $CategoryIDs = ConsolidateArrayValuesByKey($this->Data('Categories'), 'CategoryID');
-         $Wheres = array('d.CategoryID' => $CategoryIDs);
-         $this->SetData('_ShowCategoryLink', count($CategoryIDs) > 1);
-         
-         // Check permission
-         $this->Permission('Vanilla.Discussions.View', TRUE, 'Category', GetValue('PermissionCategoryID', $Category));
-         
-         // Set discussion meta data.
-         $this->EventArguments['PerPage'] = C('Vanilla.Discussions.PerPage', 30);
-         $this->FireEvent('BeforeGetDiscussions');
-         list($Offset, $Limit) = OffsetLimit($Page, $this->EventArguments['PerPage']);
-         if (!is_numeric($Offset) || $Offset < 0)
-            $Offset = 0;
-         
-         $Page = PageNumber($Offset, $Limit);
-         
-         // We want to limit the number of pages on large databases because requesting a super-high page can kill the db.
-         $MaxPages = C('Vanilla.Categories.MaxPages');
-         if ($MaxPages && $Page > $MaxPages) {
-            throw NotFoundException();
-         }
-            
-         $CountDiscussions = $DiscussionModel->GetCount($Wheres);
-         if ($MaxPages && $MaxPages * $Limit < $CountDiscussions) {
-            $CountDiscussions = $MaxPages * $Limit;
-         }
-         
-         $this->SetData('CountDiscussions', $CountDiscussions);
-         $this->SetData('_Limit', $Limit);
-         
-         // We don't wan't child categories in announcements.
-         $Wheres['d.CategoryID'] = $CategoryID;
-         $AnnounceData = $Offset == 0 ? $DiscussionModel->GetAnnouncements($Wheres) : new Gdn_DataSet();
-         $this->SetData('AnnounceData', $AnnounceData, TRUE);
-         $Wheres['d.CategoryID'] = $CategoryIDs;
-         
-         $this->DiscussionData = $this->SetData('Discussions', $DiscussionModel->GetWhere($Wheres, $Offset, $Limit));
-   
-         // Build a pager
-         $PagerFactory = new Gdn_PagerFactory();
-         $this->Pager = $PagerFactory->GetPager('Pager', $this);
-         $this->Pager->ClientID = 'Pager';
-         $this->Pager->Configure(
-            $Offset,
-            $Limit,
-            $CountDiscussions,
-            array('CategoryUrl')
-         );
-         $this->Pager->Record = $Category;
-         PagerModule::Current($this->Pager);
-         $this->SetData('_Page', $Page);
-   
-         // Set the canonical Url.
-         $this->CanonicalUrl(CategoryUrl($Category, PageNumber($Offset, $Limit)));
-         
-         // Change the controller name so that it knows to grab the discussion views
-         $this->ControllerName = 'DiscussionsController';
-         // Pick up the discussions class
-         $this->CssClass = 'Discussions Category-'.GetValue('UrlCode', $Category);
-         
-         // Deliver JSON data if necessary
-         if ($this->_DeliveryType != DELIVERY_TYPE_ALL) {
-            $this->SetJson('LessRow', $this->Pager->ToString('less'));
-            $this->SetJson('MoreRow', $this->Pager->ToString('more'));
-            $this->View = 'discussions';
-         }
-         // Render default view.
-         $this->FireEvent('BeforeCategoriesRender');
-         $this->Render();
-      }
-   }
-   
-   /**
-    * Show all (nested) categories.
-    *
-    * @since 2.0.17
-    * @access public
-    */
-   public function All($Category = '') {
-      // Setup head.
-      $this->Menu->HighlightRoute('/discussions');
-      if (!$this->Title()) {
-         $Title = C('Garden.HomepageTitle');
-         if ($Title)
-            $this->Title($Title, '');
-         else
-            $this->Title(T('All Categories'));
-      }
-      Gdn_Theme::Section('CategoryList');
-            
-      $this->Description(C('Garden.Description', NULL));
-      
-      $this->SetData('Breadcrumbs', CategoryModel::GetAncestors(GetValue('CategoryID', $this->Data('Category'))));
-     
-      // Set the category follow toggle before we load category data so that it affects the category query appropriately.
-      $CategoryFollowToggleModule = new CategoryFollowToggleModule($this);
-      $CategoryFollowToggleModule->SetToggle();
-      
-      // Get category data
-      $this->CategoryModel->Watching = !Gdn::Session()->GetPreference('ShowAllCategories');
-      
-      if ($Category) {
-         $Subtree = CategoryModel::GetSubtree($Category);
-         $CategoryIDs = ConsolidateArrayValuesByKey($Subtree, 'CategoryID');
-         $Categories = $this->CategoryModel->GetFull($CategoryIDs)->ResultArray();
-      } else {
-         $Categories = $this->CategoryModel->GetFull()->ResultArray();
-      }
-      $this->SetData('Categories', $Categories);
-      
-      // Add modules
-      $this->AddModule('NewDiscussionModule');
-      $this->AddModule('DiscussionFilterModule');
-      $this->AddModule('BookmarkedModule');
-      $this->AddModule($CategoryFollowToggleModule);
+                return parent::data($path, $default);
+        }
+    }
 
-      $this->CanonicalUrl(Url('/categories', TRUE));
-      
-      $Location = $this->FetchViewLocation('helper_functions', 'categories', FALSE, FALSE);
-      if ($Location)
-         include_once $Location;
-      $this->Render();
-   }
-
-   /**
-    * Show all categories and few discussions from each.
-    * 
-    * @since 2.0.0
-    * @access public
-    */
-   public function Discussions() {
-      // Setup head
-      $this->AddCssFile('vanilla.css');
-      $this->Menu->HighlightRoute('/discussions');
-      $this->AddJsFile('discussions.js');
-      $Title = C('Garden.HomepageTitle');
-      if ($Title)
-         $this->Title($Title, '');
-      else
-         $this->Title(T('All Categories'));
-      $this->Description(C('Garden.Description', NULL));
-      Gdn_Theme::Section('CategoryDiscussionList');
-      
-      // Set the category follow toggle before we load category data so that it affects the category query appropriately.
-      $CategoryFollowToggleModule = new CategoryFollowToggleModule($this);
-      $CategoryFollowToggleModule->SetToggle();
-      
-      // Get category data and discussions
-      $this->DiscussionsPerCategory = C('Vanilla.Discussions.PerCategory', 5);
-      $DiscussionModel = new DiscussionModel();
-      $this->CategoryModel->Watching = !Gdn::Session()->GetPreference('ShowAllCategories');
-      $this->CategoryData = $this->CategoryModel->GetFull();
-      $this->SetData('Categories', $this->CategoryData);
-      $this->CategoryDiscussionData = array();
-      foreach ($this->CategoryData->Result() as $Category) {
-         if ($Category->CategoryID > 0)
-            $this->CategoryDiscussionData[$Category->CategoryID] = $DiscussionModel->Get(0, $this->DiscussionsPerCategory, array('d.CategoryID' => $Category->CategoryID, 'Announce' => 'all'));
-      }
-      
-      // Add modules
-      $this->AddModule('NewDiscussionModule');
-      $this->AddModule('DiscussionFilterModule');
-      $this->AddModule('CategoriesModule');
-      $this->AddModule('BookmarkedModule');
-      $this->AddModule($CategoryFollowToggleModule);
-      
-      // Set view and render
-      $this->View = 'discussions';
-
-      $this->CanonicalUrl(Url('/categories', TRUE));
-      $Path = $this->FetchViewLocation('helper_functions', 'discussions', FALSE, FALSE);
-      if ($Path)
-         include_once $Path;
-      $this->Render();
-   }
-   
-   public function __get($Name) {
-      switch ($Name) {
-         case 'CategoryData':
-//            Deprecated('CategoriesController->CategoryData', "CategoriesController->Data('Categories')");
-            $this->CategoryData = new Gdn_DataSet($this->Data('Categories'), DATASET_TYPE_ARRAY);
-            $this->CategoryData->DatasetType(DATASET_TYPE_OBJECT);
-            return $this->CategoryData;
-      }
-   }
-   
-   /**
-    * Highlight route.
-    *
-    * Always called by dispatcher before controller's requested method.
-    * 
-    * @since 2.0.0
-    * @access public
-    */
-   public function Initialize() {
-      parent::Initialize();
-      if (!C('Vanilla.Categories.Use'))
-         Redirect('/discussions');
-      if ($this->Menu)
-         $this->Menu->HighlightRoute('/categories');
-         
-      $this->CountCommentsPerPage = C('Vanilla.Comments.PerPage', 30);
-   }      
+    /**
+     * Return URL based on 'isHomepage'
+     *
+     * @param array $data
+     * @return string
+     */
+    private function calculateCanonicalUrl($data) {
+        return empty($data['isHomepage']) ? url(Gdn::request()->path(), true) : url('/', true);
+    }
 }

@@ -1,160 +1,169 @@
-<?php if (!defined('APPLICATION')) exit();
-
+<?php
 /**
- * Schema representation
- * 
- * Manages defining and examining the schema of a database table.
+ * Schema representation.
  *
- * @author Todd Burry <todd@vanillaforums.com> 
- * @copyright 2003 Vanilla Forums, Inc
- * @license http://www.opensource.org/licenses/gpl-2.0.php GPL
- * @package Garden
+ * @author Todd Burry <todd@vanillaforums.com>
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
+ * @package Core
  * @since 2.0
  */
 
+/**
+ * Manages defining and examining the schema of a database table.
+ */
 class Gdn_Schema {
 
-   /**
-    * An associative array of TableName => Fields associative arrays that
-    * describe the table's field properties. Each field is represented by an
-    * object with the following properties:
-    *  Name, PrimaryKey, Type, AllowNull, Default, Length, Enum
-    */
-   protected $_Schema;
-   
-   /**
-    * The name of the table currently being examined.
-    */
-   public $CurrentTable;
-   
-   /**
-    * Class constructor. Defines the related database table name.
-    *
-    * @param string Explicitly define the name of the table that this model represents. You can also explicitly set this value with $this->TableName.
-    * @param Gdn_Database
-    */
-   public function __construct($Table = '', $Database = NULL) {
-      if ($Table != '')
-         $this->Fetch($Table, $Database);
-   }
-   
-   /**
-    * Fetches the schema for the requested table. If it does not exist yet, it
-    * will connect to the database and define it.
-    *
-    * @param string The name of the table schema to fetch from the database (or cache?).
-    * @param Gdn_Database
-    * @return array
-    */
-   public function Fetch($Table = FALSE, $Database = NULL) {
-      if ($Table !== FALSE)
-         $this->CurrentTable = $Table;
-      
-      if (!is_array($this->_Schema))
-         $this->_Schema = array();
-         
-      if (!array_key_exists($this->CurrentTable, $this->_Schema)) {
-         if($Database !== NULL) {
-            $SQL = $Database->SQL();
-         }
-         else {
-            $SQL = Gdn::SQL();
-         }
-         $this->_Schema[$this->CurrentTable] = $SQL->FetchTableSchema($this->CurrentTable);
-      }
-      return $this->_Schema[$this->CurrentTable];
-   }
+    /**
+     * @var array An associative array of TableName => Fields associative arrays that
+     * describe the table's field properties. Each field is represented by an
+     * object with the following properties: Name, PrimaryKey, Type, AllowNull, Default, Length, Enum
+     */
+    protected $_Schema;
 
-   /** Gets the array of fields/properties for the schema.
-    *
-    * @return array
-    */
-   public function Fields($Tablename = FALSE) {
-      if (!$Tablename)
-         $Tablename = $this->CurrentTable;
+    /** @var string The name of the table currently being examined. */
+    public $CurrentTable;
 
-      return $this->_Schema[$Tablename];
-   }
-   
-   /**
-    * Returns a the entire field object.
-    *
-    * @param string The name of the field to look for in $this->CurrentTable (or $Table if it is defined).
-    * @param string If this value is specified, $this->CurrentTable will be switched to $Table.
-    */
-   public function GetField($Field, $Table = '') {
-      if ($Table != '')
-         $this->CurrentTable = $Table;
-      
-      if (!is_array($this->_Schema))
-         $this->_Schema = array();
-         
-      $Result = FALSE;
-      if ($this->FieldExists($this->CurrentTable, $Field) === TRUE)
-         $Result = $this->_Schema[$this->CurrentTable][$Field];
-         
-      return $Result;
-   }
-   
-   /**
-    * Returns the value of $Property or $Default if not found.
-    *
-    * @param string The name of the field to look for in $this->CurrentTable (or $Table if it is defined).
-    * @param string The name of the property to retrieve from $Field. Options are: Name, PrimaryKey, Type, AllowNull, Default, Length, and Enum.
-    * @param string The default value to return if $Property is not found in $Field of $Table.
-    * @param string If this value is specified, $this->CurrentTable will be switched to $Table.
-    */
-   public function GetProperty($Field, $Property, $Default = FALSE, $Table = '') {
-      $Return = $Default;
-      if ($Table != '')
-         $this->CurrentTable = $Table;
-         
-      $Properties = array('Name', 'PrimaryKey', 'Type', 'AllowNull', 'Default', 'Length', 'Enum');
-      if (in_array($Property, $Properties)) {
-         $Field = $this->GetField($Field, $this->CurrentTable);
-         if ($Field !== FALSE)
-            $Return = $Field->$Property;
-      }
-         
-      return $Return;
-   }
-   
-   /**
-    * Returns a boolean value indicating if the specified $Field exists in
-    * $Table. Assumes that $this->Fetch() has been called for $Table.
-    *
-    * @param string The name of the table to look for $Field in.
-    * @param string The name of the field to look for in $Table.
-    */
-   public function FieldExists($Table, $Field) {
-      if (array_key_exists($Table, $this->_Schema)
-         && is_array($this->_Schema[$Table])
-         && array_key_exists($Field, $this->_Schema[$Table])
-         && is_object($this->_Schema[$Table][$Field]))
-         return TRUE;
-      else
-         return FALSE;
-   }
-   
-   /**
-    * Returns the name (or array of names) of the field(s) that represents the
-    * primary key on $Table.
-    *
-    * @param string The name of the table for which to find the primary key(s).
-    */
-   public function PrimaryKey($Table, $Database = NULL) {
-      $Schema = $this->Fetch($Table, $Database);
-      $PrimaryKeys = array();
-      foreach ($Schema as $FieldName => $Properties) {
-         if ($Properties->PrimaryKey === TRUE)
-            $PrimaryKeys[] = $FieldName;
-      }
-      
-      if (count($PrimaryKeys) == 0)
-         return '';
-      elseif (count($PrimaryKeys) == 1)
-         return $PrimaryKeys[0];
-      else
-         return $PrimaryKeys;
-   }
+    /**
+     * Class constructor. Defines the related database table name.
+     *
+     * @param string Explicitly define the name of the table that this model represents. You can also explicitly set this value with $this->TableName.
+     * @param Gdn_Database
+     */
+    public function __construct($table = '', $database = null) {
+        if ($table != '') {
+            $this->fetch($table, $database);
+        }
+    }
+
+    /**
+     * Fetches the schema for the requested table. If it does not exist yet, it
+     * will connect to the database and define it.
+     *
+     * @param string The name of the table schema to fetch from the database (or cache?).
+     * @param Gdn_Database
+     * @return array
+     */
+    public function fetch($table = false, $database = null) {
+        if ($table !== false) {
+            $this->CurrentTable = $table;
+        }
+
+        if (!is_array($this->_Schema)) {
+            $this->_Schema = [];
+        }
+
+        if (!array_key_exists($this->CurrentTable, $this->_Schema)) {
+            if ($database !== null) {
+                $sQL = $database->sql();
+            } else {
+                $sQL = Gdn::sql();
+            }
+            $this->_Schema[$this->CurrentTable] = $sQL->fetchTableSchema($this->CurrentTable);
+        }
+        return $this->_Schema[$this->CurrentTable];
+    }
+
+    /** Gets the array of fields/properties for the schema.
+     *
+     * @return array
+     */
+    public function fields($tablename = false) {
+        if (!$tablename) {
+            $tablename = $this->CurrentTable;
+        }
+
+        return $this->_Schema[$tablename];
+    }
+
+    /**
+     * Returns a the entire field object.
+     *
+     * @param string The name of the field to look for in $this->CurrentTable (or $table if it is defined).
+     * @param string If this value is specified, $this->CurrentTable will be switched to $table.
+     */
+    public function getField($field, $table = '') {
+        if ($table != '') {
+            $this->CurrentTable = $table;
+        }
+
+        if (!is_array($this->_Schema)) {
+            $this->_Schema = [];
+        }
+
+        $result = false;
+        if ($this->fieldExists($this->CurrentTable, $field) === true) {
+            $result = $this->_Schema[$this->CurrentTable][$field];
+        }
+
+        return $result;
+    }
+
+    /**
+     * Returns the value of $property or $default if not found.
+     *
+     * @param string The name of the field to look for in $this->CurrentTable (or $table if it is defined).
+     * @param string The name of the property to retrieve from $field. Options are: Name, PrimaryKey, Type, AllowNull, Default, Length, and Enum.
+     * @param string The default value to return if $property is not found in $field of $table.
+     * @param string If this value is specified, $this->CurrentTable will be switched to $table.
+     */
+    public function getProperty($field, $property, $default = false, $table = '') {
+        $return = $default;
+        if ($table != '') {
+            $this->CurrentTable = $table;
+        }
+
+        $properties = ['Name', 'PrimaryKey', 'Type', 'AllowNull', 'Default', 'Length', 'Enum'];
+        if (in_array($property, $properties)) {
+            $field = $this->getField($field, $this->CurrentTable);
+            if ($field !== false) {
+                $return = $field->$property;
+            }
+        }
+
+        return $return;
+    }
+
+    /**
+     * Returns a boolean value indicating if the specified $field exists in
+     * $table. Assumes that $this->fetch() has been called for $table.
+     *
+     * @param string The name of the table to look for $field in.
+     * @param string The name of the field to look for in $table.
+     */
+    public function fieldExists($table, $field) {
+        if (array_key_exists($table, $this->_Schema)
+            && is_array($this->_Schema[$table])
+            && array_key_exists($field, $this->_Schema[$table])
+            && is_object($this->_Schema[$table][$field])
+        ) {
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Returns the name (or array of names) of the field(s) that represents the
+     * primary key on $table.
+     *
+     * @param string The name of the table for which to find the primary key(s).
+     */
+    public function primaryKey($table, $database = null) {
+        $schema = $this->fetch($table, $database);
+        $primaryKeys = [];
+        foreach ($schema as $fieldName => $properties) {
+            if ($properties->PrimaryKey === true) {
+                $primaryKeys[] = $fieldName;
+            }
+        }
+
+        if (count($primaryKeys) == 0) {
+            return '';
+        } elseif (count($primaryKeys) == 1)
+            return $primaryKeys[0];
+        else {
+            return $primaryKeys;
+        }
+    }
 }

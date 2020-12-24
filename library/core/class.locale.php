@@ -1,316 +1,421 @@
-<?php if (!defined('APPLICATION')) exit();
+<?php
+/**
+ * Gdn_Locale.
+ *
+ * @author Mark O'Sullivan <mark@vanillaforums.com>
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
+ * @package Core
+ * @since 2.0
+ */
+
+use Vanilla\AddonManager;
+use Vanilla\Contracts\ConfigurationInterface;
+use Vanilla\Contracts\LocaleInterface;
 
 /**
  * The Locale class is used to load, define, change, and render translations
  * for different locales. It is a singleton class.
- *
- * @author Mark O'Sullivan <mark@vanillaforums.com>
- * @copyright 2003 Vanilla Forums, Inc
- * @license http://www.opensource.org/licenses/gpl-2.0.php GPL
- * @package Garden
- * @since 2.0
  */
+class Gdn_Locale extends Gdn_Pluggable implements LocaleInterface {
+    use \Garden\StaticCacheConfigTrait;
 
-class Gdn_Locale extends Gdn_Pluggable {
-   
-   /**
-    * The name of the currently loaded Locale
-    * @var string
-    */
-   public $Locale = '';
-   
-   /**
-    * Holds all locale sources
-    * @var Gdn_Configuration
-    */
-   public $LocaleContainer = NULL;
-   
-   /**
-    * Whether or not to record core translations
-    * @var boolean
-    */
-   public $DeveloperMode = FALSE;
-   
-   /**
-    * Core translations, and untranslated codes
-    * @var Gdn_Configuration
-    */
-   public $DeveloperContainer = NULL;
-   
-   public $SavedDeveloperCalls = 0;
-   
-   public function __construct($LocaleName, $ApplicationWhiteList, $PluginWhiteList, $ForceRemapping = FALSE) {
-      parent::__construct();
-      $this->ClassName = 'Gdn_Locale';
-      
-      $this->Set($LocaleName, $ApplicationWhiteList, $PluginWhiteList, $ForceRemapping);
-   }
-   
-   /**
-    * Reload the locale system 
-    */
-   public function Refresh() {
-      $LocalName = $this->Current();
-      
-      $ApplicationWhiteList = Gdn::ApplicationManager()->EnabledApplicationFolders();
-      $PluginWhiteList = Gdn::PluginManager()->EnabledPluginFolders();
+    /**  @var string The name of the currently loaded Locale. */
+    public $Locale = '';
 
-      $ForceRemapping = TRUE;
+    /** @var Gdn_Configuration Holds all locale sources. */
+    public $LocaleContainer = null;
 
-      $this->Set($LocalName, $ApplicationWhiteList, $PluginWhiteList, $ForceRemapping);
-   }
+    /** @var boolean Whether or not to record core translations. */
+    public $DeveloperMode = false;
 
-   public function SaveTranslations($Translations, $LocaleName = FALSE) {
-      $this->LocaleContainer->Save();
-   }
+    /** @var Gdn_Configuration Core translations, and untranslated codes. */
+    public $DeveloperContainer = null;
 
-   /**
-    * Defines and loads the locale.
-    *
-    * @param string $LocaleName The name of the locale to load. Locale definitions are kept in each
-    * application's locale folder. For example:
-    *  /dashboard/locale/$LocaleName.php
-    *  /vanilla/locale/$LocaleName.php
-    * @param array $ApplicationWhiteList An array of application folders that are safe to examine for locale
-    *  definitions.
-    * @param array $PluginWhiteList An array of plugin folders that are safe to examine for locale
-    *  definitions.
-    * @param bool $ForceRemapping For speed purposes, the application folders are crawled for locale
-    *  sources. Once sources are found, they are saved in the
-    *  cache/locale_mapppings.php file. If ForceRemapping is true, this file will
-    *  be ignored and the folders will be recrawled and the mapping file will be
-    *  re-generated. You can also simply delete the file and it will
-    *  automatically force a remapping.
-    */
-   public function Set($LocaleName, $ApplicationWhiteList, $PluginWhiteList, $ForceRemapping = FALSE) {
-      // Get locale sources
-      $this->Locale = $LocaleName;
-      $LocaleSources = $this->GetLocaleSources($LocaleName, $ApplicationWhiteList, $PluginWhiteList, $ForceRemapping);
-      
-      $Codeset = C('Garden.LocaleCodeset', 'UTF8');
-      $CurrentLocale = str_replace('-', '_', $LocaleName);
-      $SetLocale = $CurrentLocale.'.'.$Codeset;
-      setlocale(LC_TIME, $SetLocale, $CurrentLocale);
-      
-      if (!is_array($LocaleSources))
-         $LocaleSources = array();
-      
-      // Create a locale config container
-      $this->Unload();
-      
-      $ConfLocaleOverride = PATH_CONF.'/locale.php';
-      $Count = count($LocaleSources);
-      for ($i = 0; $i < $Count; ++$i) {
-         if ($ConfLocaleOverride != $LocaleSources[$i] && file_exists($LocaleSources[$i])) // Don't double include the conf override file... and make sure it comes last
-            $this->Load($LocaleSources[$i], FALSE);
-      }
+    /**
+     * @var AddonManager
+     */
+    private $addonManager = null;
 
-      // Also load any custom defined definitions from the conf directory
-      if (file_exists($ConfLocaleOverride))
-         $this->Load($ConfLocaleOverride, TRUE);
-      
-      // Prepare developer mode if needed
-      $this->DeveloperMode = C('Garden.Locales.DeveloperMode', FALSE);
-      if ($this->DeveloperMode) {
-         $this->DeveloperContainer = new Gdn_Configuration();
-         $this->DeveloperContainer->Splitting(FALSE);
-         $this->DeveloperContainer->Caching(FALSE);
-         
-         $DeveloperCodeFile = PATH_CACHE."/locale-developer-{$LocaleName}.php";
-         if (!file_exists($DeveloperCodeFile))
-            touch($DeveloperCodeFile);
-         
-         $this->DeveloperContainer->Load($DeveloperCodeFile, 'Definition', TRUE);
-      }
-      
-      // Import core (static) translations
-      if ($this->DeveloperMode)
-         $this->DeveloperContainer->MassImport($this->LocaleContainer->Get('.'));
-      
-      // Allow hooking custom definitions
-      $this->FireEvent('AfterSet');
-   }
-   
-   public function GetLocaleSources($LocaleName, $ApplicationWhiteList, $PluginWhiteList, $ForceRemapping = FALSE) {
-      $SafeLocaleName = preg_replace('/([^\w\d_-])/', '', $LocaleName); // Removes everything from the string except letters, numbers, dashes, and underscores
-      $LocaleSources = array();
-      if (!is_array($ApplicationWhiteList)) $ApplicationWhiteList = array();
-      if (!is_array($PluginWhiteList)) $PluginWhiteList = array();
-      
-      Gdn_LibraryMap::PrepareCache('locale', NULL, 'tree');
-      $LocaleSources = Gdn_LibraryMap::GetCache('locale',$SafeLocaleName);
-      if ($ForceRemapping === TRUE || !Gdn_LibraryMap::CacheReady('locale') || $LocaleSources === NULL) {
-         $LocaleSources = array();
-         // Get application-based locale definition files
-         $ApplicationLocaleSources = Gdn_FileSystem::FindAll(PATH_APPLICATIONS, CombinePaths(array('locale', $LocaleName.'.php')), $ApplicationWhiteList);
-         if ($ApplicationLocaleSources !== FALSE)
-            $LocaleSources = array_merge($LocaleSources, $ApplicationLocaleSources);
+    /** @var ConfigurationInterface $config */
+    private $config;
 
-         $ApplicationLocaleSources = Gdn_FileSystem::FindAll(PATH_APPLICATIONS, CombinePaths(array('locale', $LocaleName, 'definitions.php')), $ApplicationWhiteList);
-         if ($ApplicationLocaleSources !== FALSE)
-            $LocaleSources = array_merge($LocaleSources, $ApplicationLocaleSources);
+    /** @var array  */
+    public static $SetLocales = [
+        'ar' => 'ar_SA',
+        'az' => 'az_AZ',
+        'bg' => 'bg_BG',
+        'bs' => 'bs_BA',
+        'ca' => 'ca_ES',
+        'cs' => 'cs_CZ',
+        'da' => 'da_DK',
+        'de' => 'de_DE',
+        'el' => 'el_GR',
+        'en' => 'en_US',
+        'es' => 'es_ES',
+        'fa' => 'fa_IR',
+        'fi' => 'fi_FI',
+        'fr' => 'fr_FR',
+        'gd' => 'gd_GB',
+        'gu' => 'gu_IN',
+        'he' => 'he_IL',
+        'hi' => 'hi_IN',
+        'hr' => 'hr_HR',
+        'hu' => 'hu_HU',
+        'id' => 'id_ID',
+        'it' => 'it_IT',
+        'ja' => 'ja_JP',
+        'km' => 'km_KH',
+        'ko' => 'ko_KR',
+        'lt' => 'lt_LT',
+        'my' => 'my_MM',
+        'nb' => 'nb_NO',
+        'nl' => 'nl_NL',
+        'no' => ['no_NO', 'nn_NO'],
+        'pl' => 'pl_PL',
+        'pt' => 'pt_BR',
+        'ro' => 'ro_RO',
+        'ru' => 'ru_RU',
+        'sk' => 'sk_SK',
+        'sl' => 'sl_SI',
+        'sr' => 'sr_RS',
+        'sv' => 'sv_SE',
+        'th' => 'th_TH',
+        'tl' => 'tl_PH',
+        'tr' => 'tr_TR',
+        'uk' => 'uk_UA',
+        'ur' => 'ur_PL',
+        'vi' => 'vi_VN',
+        'zh' => 'zh_CN'
+    ];
 
-         // Get plugin-based locale definition files
-         $PluginLocaleSources = Gdn_FileSystem::FindAll(PATH_PLUGINS, CombinePaths(array('locale', $LocaleName.'.php')), $PluginWhiteList);
-         if ($PluginLocaleSources !== FALSE)
-            $LocaleSources = array_merge($LocaleSources, $PluginLocaleSources);
-            
-         $PluginLocaleSources = Gdn_FileSystem::FindAll(PATH_PLUGINS, CombinePaths(array('locale', $LocaleName, 'definitions.php')), $PluginWhiteList);
-         if ($PluginLocaleSources !== FALSE)
-            $LocaleSources = array_merge($LocaleSources, $PluginLocaleSources);
+    /** @var int  */
+    public $SavedDeveloperCalls = 0;
 
-         // Get theme-based locale definition files.
-         $Theme = C('Garden.Theme');
-         if ($Theme) {
-            $ThemeLocalePath = PATH_THEMES."/{$Theme}/locale/{$LocaleName}.php";
-            if (file_exists($ThemeLocalePath))
-               $LocaleSources[] = $ThemeLocalePath;
-         }
+    /**
+     * Setup the default locale.
+     *
+     * @param $localeName
+     * @param AddonManager|null $addonManager
+     * @param ConfigurationInterface $config
+     */
+    public function __construct($localeName, AddonManager $addonManager = null, ConfigurationInterface $config) {
+        parent::__construct();
+        $this->ClassName = __CLASS__;
 
-         // Get locale-based locale definition files.
-         $EnabledLocales = C('EnabledLocales');
-         if (is_array($EnabledLocales)) {
-            foreach ($EnabledLocales as $Key => $Locale) {
-               if ($Locale != $LocaleName)
-                  continue; // skip locales that aren't in effect.
+        if ($addonManager instanceof AddonManager) {
+            $this->addonManager = $addonManager;
+        }
+        $this->config = $config;
+        $this->set($localeName);
+    }
 
-               // Grab all of the files in the locale's folder.
-               $Paths = SafeGlob(PATH_ROOT."/locales/{$Key}/*.php");
-               if (is_array($Paths)) {
-                  foreach($Paths as $Path) {
-                     $LocaleSources[] = $Path;
-                  }
-               }
+    /**
+     * Canonicalize a locale string so different representations of the same locale can be used together.
+     *
+     * Example:
+     *
+     *     echo Gdn_Locale::canonicalize('en-us');
+     *     // prints en_US
+     *
+     * @param string $locale The locale code to canonicalize.
+     * @return string Returns the canonicalized version of the locale code.
+     */
+    public static function canonicalize($locale) {
+        $locale = str_replace(['-', '@'], ['_', '__'], $locale);
+        $parts = explode('_', $locale, 2);
+        if (isset($parts[1])) {
+            $parts[1] = strtoupper($parts[1]);
+        }
+        $result = implode('_', $parts);
+        // Remove everything from the string except letters, numbers, dashes, and underscores.
+        $result = preg_replace('/([^\w-])/', '', $result);
+
+        // This is a bit of a kludge, but we are deprecating en_CA in favour of just en.
+        if ($result === 'en_CA') {
+            $result = 'en';
+        }
+
+        return $result;
+    }
+
+    /**
+     * Reload the locale and its translations.
+     */
+    public function refresh() {
+        $locale = $this->current();
+        $this->set($locale);
+    }
+
+    /**
+     *
+     *
+     * @param $translations
+     * @param bool $localeName
+     * @throws Exception
+     */
+    public function saveTranslations($translations, $localeName = false) {
+        $this->LocaleContainer->save();
+    }
+
+    /**
+     * Defines and loads the locale.
+     *
+     * Locale definitions are kept in each addon's locale folder. For example:
+     *
+     * ```
+     * /dashboard/locale/$localeName.php
+     * /vanilla/locale/$localeName.php
+     * ```
+     *
+     * @param string $localeName The name of the locale to load.
+     */
+    public function set($localeName) {
+        $currentLocale = self::canonicalize($localeName);
+
+        // Get locale sources
+        $this->Locale = $currentLocale;
+        if ($this->addonManager !== null) {
+            $localeSources = $this->addonManager->getEnabledTranslationPaths($currentLocale);
+        } else {
+            $localeSources = [];
+        }
+
+        $codeset = c('Garden.LocaleCodeset', 'UTF8');
+
+        $setLocale = [
+            LC_TIME,
+            "$currentLocale.$codeset",
+            $currentLocale
+        ];
+
+        list($language) = explode('_', $currentLocale, 2);
+        if (isset(self::$SetLocales[$language])) {
+            $fullLocales = (array)self::$SetLocales[$language];
+
+            foreach ($fullLocales as $fullLocale) {
+                $setLocale[] = "$fullLocale.$codeset";
+                $setLocale[] = $fullLocale;
             }
-         }
-            
-         // Save the mappings
-         $FileContents = array();
-         $Count = count($LocaleSources);
-         for($i = 0; $i < $Count; ++$i)
-            $FileContents[$SafeLocaleName][] = Gdn_Format::ArrayValueForPhp($LocaleSources[$i]);
+        }
 
-         // Look for a global locale.
-         $ConfigLocale = PATH_CONF.'/locale.php';
-         if (file_exists($ConfigLocale))
-            $FileContents[$SafeLocaleName][] = $ConfigLocale;
+        $r = call_user_func_array('setlocale', $setLocale);
 
-         // Look for a config locale that is locale-specific.
-         $ConfigLocale = PATH_CONF."/locale-{$LocaleName}.php";
-         if (file_exists($ConfigLocale))
-            $FileContents[$SafeLocaleName][] = $ConfigLocale;
-         
-         Gdn_LibraryMap::PrepareCache('locale', $FileContents);
-      }
-      
-      return $LocaleSources;
-   }
+        if (!is_array($localeSources)) {
+            $localeSources = [];
+        }
 
-   /**
-    * Load a locale definition file.
-    *
-    * @param string $Path The path to the locale.
-    * @param boolean $Dynamic Whether this locale file should be the dynamic one.
-    */
-   public function Load($Path, $Dynamic = FALSE) {
-      $this->LocaleContainer->Load($Path, 'Definition', $Dynamic);
-   }
+        // Create a locale config container
+        $this->unload();
 
-   /**
-    * Assigns a translation code.
-    * 
-    * These DO NOT PERSIST.
-    *
-    * @param mixed $Code The code to provide a translation for, or an array of code => translation
-    * values to be set.
-    * @param string $Translation The definition associated with the specified code. If $Code is an array
-    *  of definitions, this value will not be used.
-    */
-   public function SetTranslation($Code, $Translation = '', $Save = FALSE) {
-      if (!is_array($Code))
-         $Code = array($Code => $Translation);
+        $confLocaleOverride = PATH_CONF.'/locale.php';
+        foreach ($localeSources as $localeSource) {
+            if ($confLocaleOverride != $localeSource && file_exists($localeSource)) { // Don't double include the conf override file... and make sure it comes last
+                $this->load($localeSource, false);
+            }
+        }
 
-      $this->LocaleContainer->SaveToConfig($Code, NULL, $Save);
-   }
+        // Also load any custom defined definitions from the conf directory
+        if (file_exists($confLocaleOverride)) {
+            $this->load($confLocaleOverride, true);
+        }
 
-   /**
-    * Translates a code into the selected locale's definition.
-    *
-    * @param string $Code The code related to the language-specific definition.
-    *   Codes thst begin with an '@' symbol are treated as literals and not translated.
-    * @param string $Default The default value to be displayed if the translation code is not found.
-    * @return string
-    */
-   public function Translate($Code, $Default = FALSE) {
-      if ($Default === FALSE)
-         $Default = $Code;
+        // Prepare developer mode if needed
+        $this->DeveloperMode = c('Garden.Locales.DeveloperMode', false);
+        if ($this->DeveloperMode) {
+            $this->DeveloperContainer = new Gdn_Configuration();
+            $this->DeveloperContainer->splitting(false);
+            $this->DeveloperContainer->caching(false);
 
-      // Codes that begin with @ are considered literals.
-      if (substr_compare('@', $Code, 0, 1) == 0)
-         return substr($Code, 1);
-      
-      $Translation = $this->LocaleContainer->Get($Code, $Default);
-      
-      // If developer mode is on, and this translation returned the default value,
-      // remember it and save it to the developer locale.
-      if ($this->DeveloperMode && $Translation == $Default) {
-         $DevKnows = $this->DeveloperContainer->Get($Code, FALSE);
-         if ($DevKnows === FALSE)
-            $this->DeveloperContainer->SaveToConfig($Code, $Default);
-      }
-      
-      return $Translation;
-   }
+            $developerCodeFile = PATH_CACHE."/locale-developer-{$localeName}.php";
+            if (!file_exists($developerCodeFile)) {
+                touch($developerCodeFile);
+            }
 
-   /**
-    *  Clears out the currently loaded locale settings.
-    */
-   public function Unload() {
-      // If we're unloading, don't save first
-      if ($this->LocaleContainer instanceof Gdn_Configuration)
-         $this->LocaleContainer->AutoSave(FALSE);
-      
-      $this->LocaleContainer = new Gdn_Configuration();
-      $this->LocaleContainer->Splitting(FALSE);
-      $this->LocaleContainer->Caching(FALSE);
-   }
+            $this->DeveloperContainer->load($developerCodeFile, 'Definition', true);
+        }
 
-   /**
-    * Returns the name of the currently loaded locale.
-    *
-    * @return boolean
-    */
-   public function Current() {
-      if ($this->Locale == '')
-         return FALSE;
-      else
-         return $this->Locale;
-   }
+        // Import core (static) translations
+        if ($this->DeveloperMode) {
+            $this->DeveloperContainer->massImport($this->LocaleContainer->get('.'));
+        }
 
-   /**
-    * Search the garden/locale folder for other locale sources that are
-    * available. Returns an array of locale names.
-    *
-    * @return array
-    */
-   public function GetAvailableLocaleSources() {
-      return Gdn_FileSystem::Folders(PATH_APPLICATIONS.'/dashboard/locale');
-   }
-   
-   /**
-    * Get all definitions from the loaded locale
-    */
-   public function GetDefinitions() {
-      return $this->LocaleContainer->Get('.');
-   }
-   
-   /**
-    * Get all known core
-    */
-   public function GetDeveloperDefinitions() {
-      if (!$this->DeveloperMode) return FALSE;
-      
-      return $this->DeveloperContainer->Get('.');
-   }
-   
+        // Allow hooking custom definitions
+        $this->fireEvent('AfterSet');
+    }
+
+    /**
+     * Crawl the various addons and locales for all of the applicable translation files.
+     *
+     * @return array Returns an array keyed by locale names where each value is an array of translation paths for that locale.
+     * @deprecated This methods was added to help debug locale canonicalization so should be able to be removed.
+     */
+    public function crawlAllLocaleSources() {
+        deprecated('Gdn_Locale->crawlAllLocaleSources()');
+
+        $addons = array_reverse($this->getEnabled(), true);
+
+        $result = [];
+        /* @var \Vanilla\Addon $addon */
+        foreach ($addons as $addon) {
+            foreach ($addon->getTranslationPaths() as $locale => $paths) {
+                foreach ($paths as $path) {
+                    $result[$locale][] = $addon->path($path);
+                }
+                $result[] = $addon->path($path);
+            }
+        }
+        return $result;
+    }
+
+    /**
+     * Gets the locale sources for a given locale.
+     *
+     * @param string $locale The name of the locale.
+     * @return array Returns an array of paths to the translations for the locale.
+     * @deprecated Use the {@link AddonManager} for this.
+     */
+    public function getLocaleSources($locale) {
+        deprecated('Gdn_PluginManager->getLocaleSources()', 'AddonManager->getEnabledLocaleSources()');
+        $result = $this->addonManager->getEnabledTranslationPaths($locale);
+        return $result;
+    }
+
+    /**
+     * Return the first 2 letters of the current locale (the language code).
+     *
+     * @param bool $iso6391 Attempt to use ISO 639-1 language codes.
+     * @return bool|string Language code on success, false on failure.
+     */
+    public function language($iso6391 = false) {
+        if ($this->Locale == '') {
+            return false;
+        } else {
+            if ($iso6391) {
+                // ISO 639-1 has some special exceptions for language codes.
+                $locale = strtolower($this->Locale);
+                switch ($locale) {
+                    case 'zh_tw':
+                        return 'zh-Hant';
+                }
+            }
+
+            return substr($this->Locale, 0, 2);
+        }
+    }
+
+    /**
+     * Load a locale definition file.
+     *
+     * @param string $path The path to the locale.
+     * @param boolean $dynamic Whether this locale file should be the dynamic one.
+     */
+    public function load($path, $dynamic = false) {
+        $this->LocaleContainer->load($path, 'Definition', $dynamic);
+    }
+
+    /**
+     * Assigns a translation code.
+     *
+     * These DO NOT PERSIST.
+     *
+     * @param mixed $code The code to provide a translation for, or an array of code => translation
+     * values to be set.
+     * @param string $translation The definition associated with the specified code. If $code is an array
+     *  of definitions, this value will not be used.
+     */
+    public function setTranslation($code, $translation = '', $save = false) {
+        if (!is_array($code)) {
+            $code = [$code => $translation];
+        }
+
+        $this->LocaleContainer->saveToConfig($code, null, $save);
+    }
+
+    /**
+     * Translates a code into the selected locale's definition.
+     *
+     * @param string $code The code related to the language-specific definition.
+     * Codes that begin with an '@' symbol are treated as literals and not translated.
+     * @param string|false $default The default value to be displayed if the translation code is not found.
+     * @return string
+     */
+    public function translate($code, $default = false) {
+        if ($default === false) {
+            $default = $code;
+        }
+
+        // Codes that begin with @ are considered literals.
+        if (substr_compare('@', $code, 0, 1) == 0) {
+            return substr($code, 1);
+        }
+
+        $translation = $this->LocaleContainer->get($code, $default);
+
+        // If developer mode is on, and this translation returned the default value,
+        // remember it and save it to the developer locale.
+        if ($this->DeveloperMode && $translation == $default) {
+            $devKnows = $this->DeveloperContainer->get($code, false);
+            if ($devKnows === false) {
+                $this->DeveloperContainer->saveToConfig($code, $default);
+            }
+        }
+
+        if (self::c('Debug', false)) {
+            $this->EventArguments['Code'] = $code;
+            $this->EventArguments['Default'] = $default;
+            $this->fireEvent('BeforeTranslate');
+        }
+
+        return $translation;
+    }
+
+    /**
+     *  Clears out the currently loaded locale settings.
+     */
+    public function unload() {
+        // If we're unloading, don't save first
+        if ($this->LocaleContainer instanceof Gdn_Configuration) {
+            $this->LocaleContainer->autoSave(false);
+        }
+
+        $this->LocaleContainer = new Gdn_Configuration();
+        $this->LocaleContainer->splitting(false);
+        $this->LocaleContainer->caching(false);
+
+        if ($this->config->get("TranslationDebug")) {
+            $this->LocaleContainer->setFallbackDecorator("☢️☢️");
+        }
+    }
+
+    /**
+     * Returns the name of the currently loaded locale.
+     *
+     * @return string
+     */
+    public function current() {
+        if ($this->Locale == '') {
+            return false;
+        } else {
+            return $this->Locale;
+        }
+    }
+
+    /**
+     * Get all definitions from the loaded locale.
+     */
+    public function getDefinitions() {
+        return $this->LocaleContainer->get('.');
+    }
+
+    /**
+     * Get all known core.
+     */
+    public function getDeveloperDefinitions() {
+        if (!$this->DeveloperMode) {
+            return false;
+        }
+
+        return $this->DeveloperContainer->get('.');
+    }
 }

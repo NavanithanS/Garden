@@ -1,120 +1,94 @@
-<?php if (!defined('APPLICATION')) exit();
-
+<?php
 /**
- * Social Controller
- *
  * Manages the social plugins.
  *
- * @author Tim Gunter <tim@vanillaforums.com>
- * @since 2.0.18
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
  * @package Dashboard
+ * @since 2.1
  */
 
+/**
+ * Handles /social endpoint, so it must be an extrovert.
+ */
 class SocialController extends DashboardController {
-   
-   /** @var array Models to automatically instantiate. */
-   public $Uses = array('Form', 'Database');
-   
-   public function Initialize() {
-      parent::Initialize();
-      Gdn_Theme::Section('Dashboard');
-   }
-   
-   public function Index() {
-      Redirect('social/manage');
-   }
-   
-   public function Manage() {
-      $this->Permission('Garden.Settings.Manage');
-      $this->Title("Social Integration");
-      $this->AddSideMenu('dashboard/social');
-      
-      $Connections = $this->GetConnections();
-      $this->SetData('Connections', $Connections);
-      
-      $this->Render();
-   }
-   
-   protected function GetConnections() {
-      
-      $this->FireEvent('GetConnections');
-      $Connections = $this->Data('Connections', array());
-      if (!is_array($Connections)) $Connections = array();
-      
-      foreach (Gdn::PluginManager()->AvailablePlugins() as $PluginKey => $PluginInfo) {
-         if (!array_key_exists('SocialConnect', $PluginInfo)) continue;
-         
-         if (!array_key_exists($PluginKey, $Connections))
-            $Connections[$PluginKey] = array();
-         
-         $ConnectionName = $PluginInfo['Index'];
-         
-         if (Gdn::PluginManager()->CheckPlugin($PluginKey)) {
-            $Configured = Gdn::PluginManager()->GetPluginInstance($ConnectionName, Gdn_PluginManager::ACCESS_PLUGINNAME)->IsConfigured();
-         } else {
-            $Configured = NULL;
-         }
-         
-         $Connections[$PluginKey] = array_merge($Connections[$PluginKey], $PluginInfo, array(
-            'Enabled'      => Gdn::PluginManager()->CheckPlugin($PluginKey),
-            'Configured'   => $Configured
-         ), array(
-            'Icon'         => sprintf("/plugins/%s/icon.png", $PluginInfo['Folder'])
-         ));
-      }
-      
-      return $Connections;
-   }
-   
-   public function Disable($Plugin) {
-      $this->Permission('Garden.Settings.Manage');
-      $Connections = $this->GetConnections();
-      unset($this->Data['Connections']);
-      
-      if (!array_key_exists($Plugin, $Connections)) {
-         throw NotFoundException('SocialConnect Plugin');
-      }
-      
-      Gdn::PluginManager()->DisablePlugin($Plugin);
-      
-      $Connections = $this->GetConnections();
-      $Connection = GetValue($Plugin, $Connections);
-      
-      require_once($this->FetchViewLocation('connection_functions'));
-      ob_start();
-      WriteConnection($Connection);
-      $Row = ob_get_clean();
-      
-      $this->JsonTarget("#Provider_{$Connection['Index']}", $Row);
-      $this->InformMessage(T("Plugin disabled."));
-      
-      unset($this->Data['Connections']);
-      $this->Render('blank', 'utility');
-   }
-   
-   public function Enable($Plugin) {
-      $this->Permission('Garden.Settings.Manage');
-      $Connections = $this->GetConnections();
-      
-      if (!array_key_exists($Plugin, $Connections)) {
-         throw NotFoundException('SocialConnect Plugin');
-      }
-      
-      Gdn::PluginManager()->EnablePlugin($Plugin, NULL);
-      
-      $Connections = $this->GetConnections();
-      $Connection = GetValue($Plugin, $Connections);
-      
-      require_once($this->FetchViewLocation('connection_functions'));
-      ob_start();
-      WriteConnection($Connection);
-      $Row = ob_get_clean();
-      
-      $this->JsonTarget("#Provider_{$Connection['Index']}", $Row);
-      $this->InformMessage(T("Plugin enabled."));
-      
-      unset($this->Data['Connections']);
-      $this->Render('blank', 'utility');
-   }
-   
+
+    /** @var array Models to automatically instantiate. */
+    public $Uses = ['Form', 'Database'];
+
+    /**
+     * Runs before every call to this controller.
+     */
+    public function initialize() {
+        parent::initialize();
+        Gdn_Theme::section('Dashboard');
+    }
+
+    /**
+     * Default method.
+     */
+    public function index() {
+        redirectTo('social/manage');
+    }
+
+    /**
+     * Settings page.
+     */
+    public function manage() {
+        $this->permission('Garden.Settings.Manage');
+        $this->title("Social Connect Addons");
+        $this->setHighlightRoute('/social/manage');
+
+        $connections = $this->getConnections();
+        $this->setData('Connections', $connections);
+
+        $this->render();
+    }
+
+    /**
+     * Find available social plugins.
+     *
+     * @return array|mixed
+     * @throws Exception
+     */
+    protected function getConnections() {
+        $this->fireEvent('GetConnections');
+        $connections = [];
+
+        $addons = Gdn::addonManager()->lookupAllByType(\Vanilla\Addon::TYPE_ADDON);
+
+        foreach ($addons as $addonName => $addon) {
+            /* @var \Vanilla\Addon $addon */
+            $addonInfo = $addon->getInfo();
+
+            // Limit to designated social addons.
+            if (!array_key_exists('socialConnect', $addonInfo)) {
+                continue;
+            }
+
+            // See if addon is enabled.
+            $isEnabled = Gdn::addonManager()->isEnabled($addonName, \Vanilla\Addon::TYPE_ADDON);
+            setValue('enabled', $addonInfo, $isEnabled);
+
+            if (!$isEnabled && !empty($addonInfo['hidden'])) {
+                // Don't show hidden addons unless they are enabled.
+                continue;
+            }
+
+            // See if we can detect whether connection is configured.
+            $isConfigured = null;
+            if ($isEnabled) {
+                $pluginInstance = Gdn::pluginManager()->getPluginInstance($addonName, Gdn_PluginManager::ACCESS_PLUGINNAME);
+                if (method_exists($pluginInstance, 'isConfigured')) {
+                    $isConfigured = $pluginInstance->isConfigured();
+                }
+            }
+            setValue('configured', $addonInfo, $isConfigured);
+
+            // Add the connection.
+            $connections[$addonName] = $addonInfo;
+        }
+
+        return $connections;
+    }
 }

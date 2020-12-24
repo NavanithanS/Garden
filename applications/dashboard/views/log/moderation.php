@@ -1,40 +1,39 @@
 <?php if (!defined('APPLICATION')) exit(); ?>
-<h1><?php echo $this->Data('Title'); ?></h1>
-<div class="Info"><?php echo T('To prevent abuse, some tools automatically hide content and list it here until it is manually approved by a moderator.'); ?></div>
-
 <?php
-echo '<noscript><div class="Errors"><ul><li>', T('This page requires Javascript.'), '</li></ul></div></noscript>';
-echo $this->Form->Open();
+
+$desc = t('To prevent abuse, some tools automatically hide content and list it here until it is manually approved by a moderator.');
+helpAsset($this->data('Title'), $desc);
+
+echo '<noscript><div class="Errors"><ul><li>', t('This page requires Javascript.'), '</li></ul></div></noscript>';
+echo $this->Form->open();
+echo heading($this->data('Title'));
 ?>
-<div class="FilterMenu"><?php
-   if (C('Vanilla.Categories.Use')) {
-      echo Wrap(sprintf(
-         T('Vanilla.Moderation.FilterBy', 'Show moderation queue for %1$s'),
-            $this->Form->CategoryDropDown('CategoryID', array(
-               'Value' => GetValue('ModerationCategoryID', $this->Data),
-               'IncludeNull' => 'Everything'))
-      ).' '.Anchor(T('Filter'), '#', array('class' => 'FilterButton SmallButton')), 'div');
-   }
-?></div>
-<div class="Info">
-   <?php
-   echo Anchor(T('Approve'), '#', array('class' => 'RestoreButton SmallButton'));
-   echo Anchor(T('Delete Forever'), '#', array('class' => 'DeleteButton SmallButton'));
-   ?>
+<div class="toolbar flex-wrap js-toolbar-sticky">
+    <div class="toolbar-buttons">
+        <?php
+        echo anchor(t('Approve'), '#', ['class' => 'RestoreButton btn btn-primary']);
+        echo anchor(t('Delete Forever'), '#', ['class' => 'DeleteButton btn btn-primary']);
+        ?>
+    </div>
+    <div class="search toolbar-main"><?php
+        if (c('Vanilla.Categories.Use')) {
+            echo '<div class="input-wrap input-wrap-multiple">';
+            echo $this->Form->categoryDropDown('CategoryID', [
+                    'Value' => val('ModerationCategoryID', $this->Data),
+                    'IncludeNull' => t('Show all categories')]
+            );
+            echo anchor(t('Filter'), '#', ['class' => 'FilterButton btn btn-primary']);
+            echo '</div>';
+        }
+        ?></div>
+    <?php PagerModule::write(['Sender' => $this, 'Limit' => 10, 'View' => 'pager-dashboard']); ?>
 </div>
 <?php
 echo '<div id="LogTable">';
 include dirname(__FILE__).'/table.php';
-echo '</div id="LogTable">';
+echo '</div>';
 ?>
-<div class="Info">
-   <?php
-   echo Anchor(T('Approve'), '#', array('class' => 'RestoreButton SmallButton'));
-   echo Anchor(T('Delete Forever'), '#', array('class' => 'DeleteButton SmallButton'));
-   ?>
-</div>
 <?php
-
-$this->AddDefinition('ExpandText', T('(more)'));
-$this->AddDefinition('CollapseText', T('(less)'));
-echo $this->Form->Close();
+$this->addDefinition('ExpandText', t('more'));
+$this->addDefinition('CollapseText', t('less'));
+echo $this->Form->close();

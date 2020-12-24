@@ -1,30 +1,29 @@
 <?php if (!defined('APPLICATION')) exit(); ?>
-<h1><?php echo $this->Data('Title'); ?></h1>
-<div class="Info"><?php echo T('Content flagged as spam is stored here for moderator review.'); ?></div>
+    <h1><?php echo $this->data('Title'); ?></h1>
 <?php
-echo '<noscript><div class="Errors"><ul><li>', T('This page requires Javascript.'), '</li></ul></div></noscript>';
-echo $this->Form->Open();
+
+helpAsset($this->data('Title'), t('Content flagged as spam is stored here for moderator review.'));
+
+echo '<noscript><div class="Errors"><ul><li>', t('This page requires Javascript.'), '</li></ul></div></noscript>';
+echo $this->Form->open();
 ?>
-<div class="Info">
-   <?php
-   echo Anchor(T('Spam'), '#', array('class' => 'SpamButton SmallButton'));
-   echo Anchor(T('Not Spam'), '#', array('class' => 'NotSpamButton SmallButton'));
-   ?>
+<div class="toolbar flex-wrap js-toolbar-sticky">
+    <div class="toolbar-buttons">
+        <?php
+        echo anchor(t('Spam'), '#', ['class' => 'SpamButton btn btn-primary']);
+        echo anchor(t('Not Spam'), '#', ['class' => 'NotSpamButton btn btn-primary']);
+        ?>
+    </div>
+    <?php PagerModule::write(['Sender' => $this, 'Limit' => 10, 'View' => 'pager-dashboard']); ?>
 </div>
 <?php
 
 echo '<div id="LogTable">';
-include dirname(__FILE__).'/table.php';
-echo '</div id="LogTable">';
+include __DIR__.'/table.php';
+echo '</div>';
 ?>
-<div class="Info">
-   <?php
-   echo Anchor(T('Spam'), '#', array('class' => 'SpamButton SmallButton'));
-   echo Anchor(T('Not Spam'), '#', array('class' => 'NotSpamButton SmallButton'));
-   ?>
-</div>
 <?php
 
-$this->AddDefinition('ExpandText', T('(more)'));
-$this->AddDefinition('CollapseText', T('(less)'));
-echo $this->Form->Close();
+$this->addDefinition('ExpandText', t('more'));
+$this->addDefinition('CollapseText', t('less'));
+echo $this->Form->close();

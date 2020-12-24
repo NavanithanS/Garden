@@ -1,56 +1,72 @@
-<?php if (!defined('APPLICATION')) exit();
-
+<?php
 /**
- * Module collection
+ * Gdn_ModuleCollection
  *
- * @author Todd Burry <todd@vanillaforums.com> 
- * @copyright 2003 Vanilla Forums, Inc
- * @license http://www.opensource.org/licenses/gpl-2.0.php GPL
- * @package Garden
+ * @author Todd Burry <todd@vanillaforums.com>
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
+ * @package Core
  * @since 2.0
  */
 
+/**
+ * Module collection.
+ */
 class Gdn_ModuleCollection extends Gdn_Module {
-   /// PROPERTIES ///
-   public $Items = array();
-   
-   /// METHODS ///
-   public function Render() {
-      $RenderedCount = 0;
-      foreach ($this->Items as $Item) {
-         $this->EventArguments['AssetName'] = $this->AssetName;
 
-         if (is_string($Item)) {
-            if (!empty($Item)) {
-               if ($RenderedCount > 0)
-                  $this->FireEvent('BetweenRenderAsset');
+    /** @var array  */
+    public $Items = [];
 
-               echo $Item;
-               $RenderedCount++;
+    /**
+     *
+     *
+     * @throws Exception
+     */
+    public function render() {
+        $renderedCount = 0;
+        foreach ($this->Items as $item) {
+            $this->EventArguments['AssetName'] = $this->AssetName;
+
+            if (is_string($item)) {
+                if (!empty($item)) {
+                    if ($renderedCount > 0) {
+                        $this->fireEvent('BetweenRenderAsset');
+                    }
+
+                    echo $item;
+                    $renderedCount++;
+                }
+            } elseif ($item instanceof Gdn_IModule) {
+                if (!getValue('Visible', $item, true)) {
+                    continue;
+                }
+
+                $lengthBefore = ob_get_length();
+                $item->render();
+                $lengthAfter = ob_get_length();
+
+                if ($lengthBefore !== false && $lengthAfter > $lengthBefore) {
+                    if ($renderedCount > 0) {
+                        $this->fireEvent('BetweenRenderAsset');
+                    }
+                    $renderedCount++;
+                }
+            } else {
+                throw new Exception();
             }
-         } elseif ($Item instanceof Gdn_IModule) {
-            if (!GetValue('Visible', $Item, TRUE))
-               continue;
-            
-            $LengthBefore = ob_get_length();
-            $Item->Render();
-            $LengthAfter = ob_get_length();
+        }
+        unset($this->EventArguments['AssetName']);
+    }
 
-            if ($LengthBefore !== FALSE && $LengthAfter > $LengthBefore) {
-               if ($RenderedCount > 0)
-                  $this->FireEvent('BetweenRenderAsset');
-               $RenderedCount++;
-            }
-         } else {
-            throw new Exception();
-         }
-      }
-      unset($this->EventArguments['AssetName']);
-   }
-   
-   public function ToString() {
-      ob_start();
-      $this->Render();
-      return ob_get_clean();
-   }
+    /**
+     * Build output HTML.
+     *
+     * @return string
+     * @throws Exception
+     */
+    public function toString() {
+        ob_start();
+        $this->render();
+        return ob_get_clean();
+    }
 }

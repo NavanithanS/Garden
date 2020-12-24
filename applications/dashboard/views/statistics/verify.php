@@ -1,11 +1,15 @@
-<div class="Slice" rel="statistics/verify">
-   <?php if ($this->Data('StatisticsVerified')) { ?>
-      <div class="StatisticsVerification StatisticsOk"><?php echo T("Verified!"); ?></div>
-   <?php } else { ?>
-      <div class="StatisticsVerification StatisticsProblem">
-         <?php echo T("Problem with credentials."); ?>
-         <?php echo $this->Form->Hidden('ClearCredentials',array('value'=>1)); ?>
-         <p><?php echo $this->Form->Button('Re-Register API Key', array('class' => 'SmallButton', 'name' => 'Reregister')); ?></p>
-      </div>
-   <?php } ?>
-</div>
+<?php
+if ($this->data('StatisticsVerified')) {
+?>
+    <div class="StatisticsVerification text-success"><?php echo t("Verified!"); ?></div>
+<?php
+} else {
+?>
+    <?php echo $this->Form->open(['action' => url('/statistics')]); ?>
+    <div class="StatisticsVerification text-danger">
+        <?php echo t("Problem with credentials."); ?>
+        <?php echo $this->Form->button('Re-Register API Key', ['class' => 'padded-left btn btn-primary', 'name' => 'Reregister']); ?>
+    </div>
+    <?php echo $this->Form->close(); ?>
+<?php
+}

@@ -1,65 +1,65 @@
 <?php if (!defined('APPLICATION')) exit();
 
-function WriteConnection($Row) {
-   $c = Gdn::Controller();
-   $Connected = GetValue('Connected', $Row);
-?>
-   <li id="<?php echo "Provider_{$Row['ProviderKey']}"; ?>" class="Item">
-      <div class="Connection-Header">
+function writeConnection($row) {
+    $c = Gdn::controller();
+    $connected = val('Connected', $row);
+    ?>
+    <li id="<?php echo "Provider_{$row['ProviderKey']}"; ?>" class="Item">
+        <div class="Connection-Header">
          <span class="IconWrap">
             <?php
-               echo Img(GetValue('Icon', $Row, Asset('/applications/dashboard/design/images/connection-64.png')));
+            echo img(val('Icon', $row, asset('/applications/dashboard/design/images/connection-64.png')));
             ?>
          </span>
          <span class="Connection-Name">
             <?php
-               echo GetValue('Name', $Row, T('Unknown'));
-               
-               if ($Connected) {
-                  echo ' <span class="Gloss Connected">';
-                  
-                  if ($Photo = GetValueR('Profile.Photo', $Row)) {
-                     echo ' '.Img($Photo, array('class' => 'ProfilePhoto ProfilePhotoSmall'));
-                  }
-                  
-                  echo ' '.htmlspecialchars(GetValueR('Profile.Name', $Row)).'</span>';
-               }
+            echo val('Name', $row, t('Unknown'));
+
+            if ($connected) {
+                echo ' <span class="Gloss Connected">';
+
+                if ($photo = valr('Profile.Photo', $row)) {
+                    echo ' '.img($photo, ['class' => 'ProfilePhoto ProfilePhotoSmall']);
+                }
+
+                echo ' '.htmlspecialchars(getValueR('Profile.Name', $row)).'</span>';
+            }
             ?>
          </span>
          <span class="Connection-Connect">
             <?php
-            echo ConnectButton($Row);
+            echo connectButton($row);
             ?>
          </span>
-      </div>
-<!--      <div class="Connection-Body">
+        </div>
+        <!--      <div class="Connection-Body">
          <?php
-         
-//         if (Debug()) {
-//            decho(GetValue($Row['ProviderKey'], $c->User->Attributes), 'Attributes');
-//         }
-         ?>
+
+        //         if (debug()) {
+        //            decho(val($Row['ProviderKey'], $c->User->Attributes), 'Attributes');
+        //         }
+        ?>
       </div>-->
-   </li>
+    </li>
 <?php
 }
 
 
-function ConnectButton($Row) {
-   $c = Gdn::Controller();
-   
-   $Connected = GetValue('Connected', $Row);
-   $CssClass = $Connected ? 'Active' : 'InActive';
-   $ConnectUrl = GetValue('ConnectUrl', $Row);
-   $DisconnectUrl = UserUrl($c->User, '', 'Disconnect', array('provider' => $Row['ProviderKey']));
+function connectButton($row) {
+    $c = Gdn::controller();
 
-   $Result = '<span class="ActivateSlider ActivateSlider-'.$CssClass.'">';
-   if ($Connected) {
-      $Result .= Anchor(T('Connected'), $DisconnectUrl, 'Button Primary Hijack');
-   } else {
-      $Result .= Anchor(T('Connect'), $ConnectUrl, 'Button');
-   }
-   $Result .= '</span>';
-   
-   return $Result;
+    $connected = val('Connected', $row);
+    $cssClass = $connected ? 'Active' : 'InActive';
+    $connectUrl = val('ConnectUrl', $row);
+    $disconnectUrl = userUrl($c->User, '', 'Disconnect', ['provider' => $row['ProviderKey']]);
+
+    $result = '<span class="ActivateSlider ActivateSlider-'.$cssClass.'">';
+    if ($connected) {
+        $result .= anchor(t('Connected'), $disconnectUrl, 'Button Primary Hijack ActivateSlider-Button');
+    } else {
+        $result .= anchor(t('Connect'), $connectUrl, 'Button ActivateSlider-Button', ['target' => '_top']);
+    }
+    $result .= '</span>';
+
+    return $result;
 }

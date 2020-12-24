@@ -1,903 +1,1158 @@
-<?php if (!defined('APPLICATION')) exit();
-
+<?php
 /**
- * Analytics system
- * 
- * Handles install-side analytics gathering and sending.
+ * Analytics system.
  *
  * @author Mark O'Sullivan <markm@vanillaforums.com>
- * @author Todd Burry <todd@vanillaforums.com> 
+ * @author Todd Burry <todd@vanillaforums.com>
  * @author Tim Gunter <tim@vanillaforums.com>
- * @copyright 2003 Vanilla Forums, Inc
- * @license http://www.opensource.org/licenses/gpl-2.0.php GPL
- * @package Garden
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
+ * @package Core
  * @since 2.0.17
  */
-class Gdn_Statistics extends Gdn_Plugin {
 
-   protected $AnalyticsServer;
-   public static $Increments = array('h' => 'hours', 'd' => 'days', 'w' => 'weeks', 'm' => 'months', 'y' => 'years');
-   
-   protected $TickExtra;
+use Vanilla\CurrentTimeStamp;
 
-   public function __construct() {
-      parent::__construct();
-      
-      $AnalyticsServer = C('Garden.Analytics.Remote', 'analytics.vanillaforums.com');
-      $AnalyticsServer = str_replace(array('http://', 'https://'), '', $AnalyticsServer);
-      $this->AnalyticsServer = $AnalyticsServer;
-      
-      $this->TickExtra = array();
-   }
+/**
+ * Handles install-side analytics gathering and sending.
+ */
+class Gdn_Statistics extends Gdn_Pluggable {
+    /** @var mixed  */
+    protected $AnalyticsServer;
 
-   public function Analytics($Method, $RequestParameters, $Callback = FALSE, $ParseResponse = TRUE) {
-      $FullMethod = explode('/',$Method);
-      if (sizeof($FullMethod) < 2)
-         array_unshift($FullMethod, "analytics");
-      
-      list($ApiController, $ApiMethod) = $FullMethod;
-      $ApiController = strtolower($ApiController);
-      $ApiMethod = StringEndsWith(strtolower($ApiMethod), '.json', TRUE, TRUE).'.json';
-      
-      $FinalURL = 'http://'.CombinePaths(array(
-         $this->AnalyticsServer,
-         $ApiController,
-         $ApiMethod
-      ));
-      
-      // Allow hooking of analytics events
-      $this->EventArguments['AnalyticsMethod'] = &$Method;
-      $this->EventArguments['AnalyticsArgs'] = &$RequestParameters;
-      $this->EventArguments['AnalyticsUrl'] = &$FinalURL;
-      $this->FireEvent('SendAnalytics');
-      
-      // Sign request
-      $this->Sign($RequestParameters, TRUE);
-      $RequestMethod = GetValue('RequestMethod', $RequestParameters, 'GET');
-      unset($RequestParameters['RequestMethod']);
-      
-      try {
-         $ProxyRequest = new ProxyRequest(FALSE, array(
-            'Method'    => $RequestMethod,
-            'Timeout'   => 10,
-            'Cookies'   => FALSE
-         ));
-         $Response = $ProxyRequest->Request(array(
-            'Url'       => $FinalURL
-         ), $RequestParameters);
-      } catch (Exception $e) {
-         $Response = FALSE;
-      }
-      
-      if ($Response !== FALSE) {
-         $JsonResponse = json_decode($Response, TRUE);         
-         
-         if ($JsonResponse !== FALSE) {
-            if ($ParseResponse) {
-               $AnalyticsJsonResponse = (array)GetValue('Analytics', $JsonResponse, FALSE);
-               // If we received a reply, parse it
-               if ($AnalyticsJsonResponse !== FALSE) {
-                  $this->ParseAnalyticsResponse($AnalyticsJsonResponse, $Response, $Callback);
-                  return $AnalyticsJsonResponse;
-               }
-            } else {
-               return $JsonResponse;
+    /** @var array  */
+    public static $Increments = ['h' => 'hours', 'd' => 'days', 'w' => 'weeks', 'm' => 'months', 'y' => 'years'];
+
+    /** @var array  */
+    protected $TickExtra;
+
+    /**
+     *
+     */
+    public function __construct() {
+        parent::__construct();
+
+        $analyticsServer = c('Garden.Analytics.Remote', 'https://analytics.vanillaforums.com');
+        $this->AnalyticsServer = $analyticsServer;
+
+        $scheme = parse_url($this->AnalyticsServer, PHP_URL_SCHEME); // Will give you the protocol (http, https) or null/false on error.
+
+        if ($scheme === null) {
+            $this->AnalyticsServer = 'https://'.$this->AnalyticsServer;
+        }
+
+        $this->TickExtra = [];
+    }
+
+    /**
+     * Call the analytics server.
+     *
+     * @param string $method
+     * @param array $requestParameters
+     * @param bool $callback
+     * @param bool $parseResponse
+     * @return array|bool|mixed
+     * @throws Exception
+     */
+    public function analytics($method, $requestParameters, $callback = false, $parseResponse = true) {
+        $fullMethod = explode('/', $method);
+        if (sizeof($fullMethod) < 2) {
+            array_unshift($fullMethod, "analytics");
+        }
+
+        [$apiController, $apiMethod] = $fullMethod;
+        $apiController = strtolower($apiController);
+        $apiMethod = stringEndsWith(strtolower($apiMethod), '.json', true, true).'.json';
+
+        $finalURL = combinePaths([
+                $this->AnalyticsServer,
+                $apiController,
+                $apiMethod
+            ]);
+
+        $requestHeaders = [];
+
+        // Allow hooking of analytics events
+        $this->EventArguments['AnalyticsMethod'] = &$method;
+        $this->EventArguments['AnalyticsArgs'] = &$requestParameters;
+        $this->EventArguments['AnalyticsUrl'] = &$finalURL;
+        $this->EventArguments['AnalyticsHeaders'] = &$requestHeaders;
+        $this->fireEvent('SendAnalytics');
+
+        // Sign request
+        $this->sign($requestParameters, true);
+        $requestMethod = val('RequestMethod', $requestParameters, 'GET');
+        unset($requestParameters['RequestMethod']);
+
+        try {
+            $proxyRequest = new ProxyRequest(false, [
+                'Method' => $requestMethod,
+                'Timeout' => 10,
+                'Cookies' => false
+            ]);
+            $response = $proxyRequest->request([
+                'Url' => $finalURL,
+                'Log' => false
+            ], $requestParameters, null, $requestHeaders);
+        } catch (Exception $e) {
+            $response = false;
+        }
+
+        if ($response !== false) {
+            $jsonResponse = json_decode($response, true);
+
+            if ($jsonResponse !== false) {
+                if ($parseResponse) {
+                    $analyticsJsonResponse = (array)val('Analytics', $jsonResponse, false);
+                    // If we received a reply, parse it
+                    if ($analyticsJsonResponse !== false) {
+                        $this->parseAnalyticsResponse($analyticsJsonResponse, $response, $callback);
+                        return $analyticsJsonResponse;
+                    }
+                } else {
+                    return $jsonResponse;
+                }
             }
-         }
-         
-         return $Response;
-      }
-      
-      return FALSE;
-   }
-   
-   public function Api($Method, $Parameters) {
-      $ApiResponse = $this->Analytics($Method, $Parameters, FALSE, FALSE);
-      return $ApiResponse;
-   }
-   
-   protected function AnalyticsFailed($JsonResponse) {
-      self::Throttled(TRUE);
 
-      $Reason = GetValue('Reason', $JsonResponse, NULL);
-      if (!is_null($Reason))
-         Gdn::Controller()->InformMessage("Analytics: {$Reason}");
-   }
+            return $response;
+        }
 
-   public function Base_Render_Before($Sender) {
-      // If this is a full page request, trigger stats environment check
-      if ($Sender->DeliveryType() == DELIVERY_TYPE_ALL) {
-         $this->Check();
-      }
-   }
+        return false;
+    }
 
-   /**
-    * Automatically configures a ProxyRequest array with basic parameters
-    * such as IP, VanillaVersion, RequestTime, Hostname, PHPVersion, ServerType.
-    * 
-    * @param array $Request Reference to the existing request array
-    * @return void
-    */
-   public function BasicParameters(&$Request) {
-      $Request = array_merge($Request, array(
-         'ServerHostname' => Url('/', TRUE),
-         'ServerType' => Gdn::Request()->GetValue('SERVER_SOFTWARE'),
-         'PHPVersion' => phpversion(),
-         'VanillaVersion' => APPLICATION_VERSION
-      ));
-   }
+    /**
+     *
+     *
+     * @param $method
+     * @param $parameters
+     * @return array|bool|mixed
+     */
+    public function api($method, $parameters) {
+        $apiResponse = $this->analytics($method, $parameters, false, false);
+        return $apiResponse;
+    }
 
-   /**
-    * This method is called each page request and checks the environment. If
-    * a stats send is warranted, tells the browser to ping us back.
-    *
-    * If the site is not registered at the analytics server (does not contain 
-    * a guid), have the browser request a register instead and defer stats until
-    * next request.
-    * 
-    * @return void
-    */
-   public function Check() {
-      // If we're hitting an exception app, short circuit here
-      if (!self::CheckIsAllowed()) {
-         return;
-      }
-      Gdn::Controller()->AddDefinition('AnalyticsTask', 'tick');
-      
-      if (self::CheckIsEnabled()) {
-         // At this point there is nothing preventing stats from working, so queue a tick.
-         Gdn::Controller()->AddDefinition('TickExtra', $this->GetEncodedTickExtra());
-      }
-   }
-   
-   public function AddExtra($Name, $Value) {
-      $this->TickExtra[$Name] = $Value;
-   }
-   
-   public function GetEncodedTickExtra() {
-      if (!sizeof($this->TickExtra))
-         return NULL;
-      
-      return @json_encode($this->TickExtra);
-   }
+    /**
+     *
+     *
+     * @param $jsonResponse
+     */
+    protected function analyticsFailed($jsonResponse) {
+        self::throttled(true);
 
-   public static function CheckIsAllowed() {
-      // These applications are not included in statistics
-      $ExceptionApplications = array('dashboard');
+        $reason = val('Reason', $jsonResponse, null);
+        if (!is_null($reason)) {
+            Gdn::controller()->informMessage("Analytics: {$reason}");
+        }
+    }
 
-      // ... unless one of these paths is requested
-      $ExceptionPaths = array('profile*', 'activity*');
+    /**
+     * Automatically configures a ProxyRequest array with basic parameters
+     * such as IP, VanillaVersion, RequestTime, Hostname, PHPVersion, ServerType.
+     *
+     * @param array $request Reference to the existing request array
+     * @return void
+     */
+    public function basicParameters(&$request) {
+        $request = array_merge($request, [
+            'ServerHostname' => url('/', true),
+            'ServerType' => Gdn::request()->getValue('SERVER_SOFTWARE'),
+            'PHPVersion' => str_replace(PHP_EXTRA_VERSION, '', PHP_VERSION),
+            'VanillaVersion' => APPLICATION_VERSION
+        ]);
+    }
 
-      $Path = Gdn::Request()->Path();
-      foreach ($ExceptionPaths as $ExceptionPath)
-         if (fnmatch($ExceptionPath, $Path))
-            return TRUE;
+    /**
+     * This method is called each page request and checks the environment. If
+     * a stats send is warranted, tells the browser to ping us back.
+     *
+     * If the site is not registered at the analytics server (does not contain
+     * a guid), have the browser request a register instead and defer stats until
+     * next request.
+     *
+     * @return void
+     */
+    public function check() {
+        // If we're hitting an exception app, short circuit here
+        if (!self::checkIsEnabled()) {
+            return;
+        }
+        Gdn::controller()->addDefinition('AnalyticsTask', 'tick');
 
-      $ApplicationFolder = Gdn::Controller()->ApplicationFolder;
-      if (in_array($ApplicationFolder, $ExceptionApplications))
-         return FALSE;
-      
-      // If we've recently received an error response, wait until the throttle expires
-      if (self::Throttled()) {
-         return FALSE;
-      }
+        if (self::checkIsAllowed()) {
+            // At this point there is nothing preventing stats from working, so queue a tick.
+            Gdn::controller()->addDefinition('TickExtra', $this->getEncodedTickExtra());
+        }
+    }
 
-      return TRUE;
-   }
+    /**
+     *
+     *
+     * @param $name
+     * @param $value
+     */
+    public function addExtra($name, $value) {
+        $this->TickExtra[$name] = $value;
+    }
 
-   public static function CheckIsLocalhost() {
-      $ServerAddress = Gdn::Request()->IpAddress();
-      $ServerHostname = Gdn::Request()->GetValue('SERVER_NAME');
+    /**
+     *
+     *
+     * @return null|string
+     */
+    public function getEncodedTickExtra() {
+        if (!sizeof($this->TickExtra)) {
+            return null;
+        }
 
-      // IPv6 Localhost
-      if ($ServerAddress == '::1')
-         return TRUE;
+        return @json_encode($this->TickExtra);
+    }
 
-      // Private subnets
-      foreach (array(
-         '127.0.0.1/0',
-         '10.0.0.0/8',
-         '172.16.0.0/12',
-         '192.168.0.0/16') as $LocalCIDR) {
-         if (self::CIDRCheck($ServerAddress, $LocalCIDR))
-            return TRUE;
-      }
+    /**
+     *
+     *
+     * @return bool
+     */
+    public static function checkIsAllowed() {
+        // These applications are not included in statistics
+        $exceptionApplications = ['dashboard'];
 
-      // Comment local hostnames / hostname suffixes 
-      if ($ServerHostname == 'localhost' || substr($ServerHostname, -6) == '.local')
-         return TRUE;
+        // ... unless one of these paths is requested
+        $exceptionPaths = ['profile*', 'activity*'];
 
-      // If we get here, we're likely public
-      return FALSE;
-   }
+        $path = Gdn::request()->path();
+        foreach ($exceptionPaths as $exceptionPath) {
+            if (fnmatch($exceptionPath, $path)) {
+                return true;
+            }
+        }
 
-   public static function CheckIsEnabled() {
-      // Forums that are busy installing should not yet be tracked
-      if (!C('Garden.Installed', FALSE))
-         return FALSE;
-
-      // Enabled if not explicitly disabled via config
-      if (!C('Garden.Analytics.Enabled', TRUE))
-         return FALSE;
-
-      // Don't track things for local sites (unless overridden in config)
-      if (self::CheckIsLocalhost() && !C('Garden.Analytics.AllowLocal', FALSE))
-         return 0;
-
-      return TRUE;
-   }
-
-   // credit: claudiu(at)cnixs.com via php.net/manual/en/ref.network.php
-   public static function CIDRCheck($IP, $CIDR) {
-      list ($net, $mask) = explode("/", $CIDR);
-
-      // Allow non-standard /0 syntax
-      if ($mask == 0) {
-         if (ip2long($IP) == ip2long($net))
-            return true;
-         else
+        $applicationFolder = Gdn::controller()->ApplicationFolder;
+        if (in_array($applicationFolder, $exceptionApplications)) {
             return false;
-      }
+        }
 
-      $ip_net = ip2long($net);
-      $ip_mask = ~((1 << (32 - $mask)) - 1);
+        // If we've recently received an error response, wait until the throttle expires
+        if (self::throttled()) {
+            return false;
+        }
 
-      $ip_ip = ip2long($IP);
+        return true;
+    }
 
-      $ip_ip_net = $ip_ip & $ip_mask;
+    /**
+     *
+     *
+     * @return bool
+     */
+    public static function checkIsLocalhost() {
+        $serverAddress = Gdn::request()->ipAddress();
+        $serverHostname = Gdn::request()->getValue('SERVER_NAME');
 
-      return ($ip_ip_net == $ip_net);
-   }
+        // IPv6 Localhost
+        if ($serverAddress == '::1') {
+            return true;
+        }
 
-   protected function DoneRegister($Response, $Raw) {
-      $VanillaID = GetValue('VanillaID', $Response, FALSE);
-      $Secret = GetValue('Secret', $Response, FALSE);
-      if (($Secret && $VanillaID) !== FALSE) {
-         Gdn::InstallationID($VanillaID);
-         Gdn::InstallationSecret($Secret);
-         Gdn::Set('Garden.Analytics.Registering', NULL);
-         Gdn::Set('Garden.Analytics.LastSentDate', NULL);
-      }
-   }
-
-   protected function DoneStats($Response, $Raw) {
-      $SuccessTimeSlot = GetValue('TimeSlot', $Response, FALSE);
-      if ($SuccessTimeSlot !== FALSE)
-         self::LastSentDate($SuccessTimeSlot);
-   }
-
-   public static function FirstDate() {
-      $FirstDate = Gdn::SQL()
-                      ->Select('DateInserted', 'min')
-                      ->From('User')
-                      ->Where('DateInserted >', '0000-00-00')
-                      ->Get()->Value('DateInserted');
-      return $FirstDate;
-   }
-
-   public static function LastSentDate($SetLastSentDate = NULL) {
-      static $LastSentDate = NULL;
-
-      // Set
-      if (!is_null($SetLastSentDate)) {
-         $LastSentDate = $SetLastSentDate;
-         Gdn::Set('Garden.Analytics.LastSentDate', $LastSentDate);
-      }
-
-      // Lazy Load
-      if ($LastSentDate === NULL)
-         $LastSentDate = Gdn::Get('Garden.Analytics.LastSentDate', FALSE);
-
-      return $LastSentDate;
-   }
-
-   protected function ParseAnalyticsResponse($JsonResponse, $RawResponse, $Callbacks) {
-
-      // Verify signature of reply
-      $Verified = $this->VerifySignature($JsonResponse);
-      if ($Verified === FALSE)
-         return;
-
-      // Only allow commands when verification was explicitly successful
-      if ($Verified === TRUE) {
-         // Perform response commands
-         foreach ($JsonResponse as $CommandName => $CommandValue) {
-            switch ($CommandName) {
-               case 'DoDeregister':
-                  if ($Verified) {
-                     // De-register yourself
-                     Gdn::InstallationID(FALSE);
-                     Gdn::InstallationSecret(FALSE);
-                  }
-                  break;
-
-               case 'DoDisable':
-                  if ($Verified) {
-                     // Turn yourself off
-                     SaveToConfig('Garden.Analytics.Enabled', FALSE);
-                  }
-                  break;
-
-               case 'DoCall':
-                  // Call the admin's attention to the statistics
-                  Gdn::Set('Garden.Analytics.Notify', $CommandValue);
-                  break;
-
-               default:
-                  // Nothing
-                  break;
+        // Private subnets
+        foreach ([
+                     '127.0.0.1/0',
+                     '10.0.0.0/8',
+                     '172.16.0.0/12',
+                     '192.168.0.0/16'] as $localCIDR) {
+            if (self::cidrCheck($serverAddress, $localCIDR)) {
+                return true;
             }
-         }
-      }
+        }
 
-      if (is_string($Callbacks)) {
-         // Assume a string is the Success event handler
-         $Callbacks = array(
-             'Success' => $Callbacks
-         );
-      }
+        // Comment local hostnames / hostname suffixes
+        if ($serverHostname == 'localhost' || substr($serverHostname, -6) == '.local') {
+            return true;
+        }
 
-      if (!is_array($Callbacks))
-         $Callbacks = array();
+        // If we get here, we're likely public
+        return false;
+    }
 
-      // Assume strings are local methods
-      foreach ($Callbacks as $Event => &$CallbackMethod)
-         if (is_string($CallbackMethod))
-            $CallbackMethod = array($this, $CallbackMethod);
+    /**
+     *
+     *
+     * @return bool|int
+     */
+    public static function checkIsEnabled() {
+        // Forums that are busy installing should not yet be tracked
+        if (!c('Garden.Installed', false)) {
+            return false;
+        }
 
-      $ResponseCode = GetValue('Status', $JsonResponse, 500);
-      $CallbackExecute = NULL;
-      switch ($ResponseCode) {
-         case FALSE:
-         case 500:
-            if (array_key_exists('Failure', $Callbacks))
-               $CallbackExecute = $Callbacks['Failure'];
-            break;
+        // Enabled if not explicitly disabled via config
+        if (!c('Garden.Analytics.Enabled', true)) {
+            return false;
+        }
 
-         case TRUE:
-         case 200:
-            self::Throttled(FALSE);
-            if (array_key_exists('Success', $Callbacks))
-               $CallbackExecute = $Callbacks['Success'];
-            break;
-      }
+        // Don't track things for local sites (unless overridden in config)
+        if (self::checkIsLocalhost() && !c('Garden.Analytics.AllowLocal', false)) {
+            return 0;
+        }
 
-      if (!is_null($CallbackExecute))
-         call_user_func($CallbackExecute, $JsonResponse, $RawResponse);
-   }
+        return true;
+    }
 
-   public function Register() {
+    /**
+     *
+     *
+     * credit: claudiu(at)cnixs.com via php.net/manual/en/ref.network.php
+     *
+     * @param $iP
+     * @param $cIDR
+     * @return bool
+     */
+    public static function cidrCheck($iP, $cIDR) {
+        [$net, $mask] = explode("/", $cIDR);
 
-      // Set the time we last attempted to perform registration
-      Gdn::Set('Garden.Analytics.Registering', time());
-
-      // Request registration from remote server
-      $Request = array();
-      $this->BasicParameters($Request);
-      $this->Analytics('Register', $Request, array(
-         'Success' => 'DoneRegister',
-         'Failure' => 'AnalyticsFailed'
-      ));
-   }
-
-   /**
-    * 
-    * @param Gdn_Controller $Sender
-    */
-   public function SettingsController_AnalyticsTick_Create($Sender) {
-      $Sender->DeliveryMethod(DELIVERY_METHOD_JSON);
-      $Sender->DeliveryType(DELIVERY_TYPE_DATA);
-      
-      Gdn::Statistics()->Tick();
-      $this->FireEvent("AnalyticsTick");
-      $Sender->Render();
-   }
-
-   /**
-    * Sign a request or response
-    * 
-    * Uses the known site secret to sign the given request or response. The 
-    * request/response is passed in by reference so that it can be augmented 
-    * with the signature.
-    * 
-    * @param array $Request The request array to be signed
-    * @param boolean $Modify Optional whether or not to modify the request in place (default false)
-    */
-   public function Sign(&$Request, $Modify = FALSE) {
-
-      // Fail if no ID is present
-      $VanillaID = GetValue('VanillaID', $Request, FALSE);
-      if (empty($VanillaID))
-         return FALSE;
-      
-      if ($VanillaID != Gdn::InstallationID()) return FALSE;
-
-      // We're going to work on a copy for now
-      $SignatureArray = $Request;
-
-      // Build the request time
-      $RequestTime = Gdn_Statistics::Time();
-      // Get the secret key
-      $RequestSecret = Gdn::InstallationSecret();
-
-      // Remove the hash from the request data before checking or building the signature
-      unset($SignatureArray['SecurityHash']);
-
-      // Add the real secret and request time
-      $SignatureArray['Secret'] = $RequestSecret;
-      $SignatureArray['RequestTime'] = $RequestTime;
-
-      $SignData = array_intersect_key($SignatureArray, array_fill_keys(array(
-         'VanillaID',
-         'Secret',
-         'RequestTime',
-         'TimeSlot'
-      ), NULL));
-
-      // ksort the array to preserve a known order
-      $SignData = array_change_key_case($SignData, CASE_LOWER);
-      ksort($SignData);
-
-      // Calculate the hash
-      $RealHash = sha1(http_build_query($SignData));
-
-      if ($Modify) {
-         $Request['RequestTime'] = $RequestTime;
-         $Request['SecurityHash'] = $RealHash;
-         ksort($Request);
-      }
-
-      return $RealHash;
-   }
-
-   protected function Stats() {
-      $Request = array();
-      $this->BasicParameters($Request);
-
-      $VanillaID = Gdn::InstallationID();
-      $VanillaSecret = Gdn::InstallationSecret();
-      // Don't try to send stats if we don't have a proper install
-      if (is_null($VanillaID) || is_null($VanillaSecret))
-         return;
-
-      // Always look at stats for the day following the previous successful send.
-      $LastSentDate = self::LastSentDate();
-      if ($LastSentDate === FALSE) // Never sent
-         $StatsDate = strtotime('yesterday');
-      else
-         $StatsDate = strtotime('+1 day', self::TimeFromTimeSlot($LastSentDate));
-
-      $StatsTimeSlot = date('Ymd', $StatsDate);
-      if ($StatsTimeSlot >= date('Ymd'))
-         return;
-
-      $DetectActiveInterval = 0;
-      $MaxIterations = 10;
-      $TimeSlotLimit = date('Ymd');
-      do {
-
-         $TimeSlot = date('Ymd', $StatsDate);
-
-         // We're caught up to today. Stop looping.
-         if ($TimeSlot >= $TimeSlotLimit)
-            break;
-
-         $DayStart = date('Y-m-d 00:00:00', $StatsDate);
-         $DayEnd = date('Y-m-d 23:59:59', $StatsDate);
-
-         // Get relevant stats
-         $NumComments = Gdn::SQL()
-                         ->Select('DateInserted', 'COUNT', 'Hits')
-                         ->From('Comment')
-                         ->Where('DateInserted>=', $DayStart)
-                         ->Where('DateInserted<', $DayEnd)
-                         ->Get()->FirstRow(DATASET_TYPE_ARRAY);
-         $NumComments = GetValue('Hits', $NumComments, NULL);
-
-         $NumDiscussions = Gdn::SQL()
-                         ->Select('DateInserted', 'COUNT', 'Hits')
-                         ->From('Discussion')
-                         ->Where('DateInserted>=', $DayStart)
-                         ->Where('DateInserted<', $DayEnd)
-                         ->Get()->FirstRow(DATASET_TYPE_ARRAY);
-         $NumDiscussions = GetValue('Hits', $NumDiscussions, NULL);
-
-         $NumUsers = Gdn::SQL()
-                         ->Select('DateInserted', 'COUNT', 'Hits')
-                         ->From('User')
-                         ->Where('DateInserted>=', $DayStart)
-                         ->Where('DateInserted<', $DayEnd)
-                         ->Get()->FirstRow(DATASET_TYPE_ARRAY);
-         $NumUsers = GetValue('Hits', $NumUsers, NULL);
-
-         $NumViewsData = Gdn::SQL()
-                         ->Select('Views, EmbedViews')
-                         ->From('AnalyticsLocal')
-                         ->Where('TimeSlot', $TimeSlot)
-                         ->Get()->FirstRow(DATASET_TYPE_ARRAY);
-         
-         $NumViews = GetValue('Views', $NumViewsData, NULL);
-         $NumEmbedViews = GetValue('EmbedViews', $NumViewsData, NULL);
-
-         $DetectActiveInterval = array_sum(array(
-            $NumComments,
-            $NumDiscussions,
-            $NumUsers,
-            $NumViews,
-            $NumEmbedViews
-         ));
-
-         $StatsDate = strtotime('+1 day', $StatsDate);
-         $MaxIterations--;
-      } while ($DetectActiveInterval == 0 && $MaxIterations);
-
-      if ($DetectActiveInterval == 0) {
-         // We've looped $MaxIterations times or up until yesterday and couldn't find any stats. Remember our place and return.
-         self::LastSentDate($TimeSlot);
-         return;
-      }
-
-      // Assemble Stats
-      $Request = array_merge($Request, array(
-         'VanillaID' => $VanillaID,
-         'TimeSlot' => $TimeSlot,
-         'CountComments' => $NumComments,
-         'CountDiscussions' => $NumDiscussions,
-         'CountUsers' => $NumUsers,
-         'CountViews' => $NumViews,
-         'CountEmbedViews' => $NumEmbedViews
-      ));
-
-      // Send stats to remote server
-      $this->Analytics('Stats', $Request, array(
-         'Success' => 'DoneStats',
-         'Failure' => 'AnalyticsFailed'
-      ));
-   }
-
-   public static function Throttled($SetThrottled = NULL) {
-      static $Throttled = NULL;
-
-      // Set
-      if (!is_null($SetThrottled)) {
-         if ($SetThrottled) {
-            $ThrottleDelay = C('Garden.Analytics.ThrottleDelay', 3600);
-            $ThrottleValue = time() + $ThrottleDelay;
-         } else {
-            $ThrottleValue = NULL;
-         }
-         $Throttled = (!is_null($ThrottleValue)) ? $ThrottleValue : 0;
-         Gdn::Set('Garden.Analytics.Throttle', $ThrottleValue);
-      }
-
-      // Lazy Load
-      if ($Throttled === NULL)
-         $Throttled = Gdn::Get('Garden.Analytics.Throttle', 0);
-
-      return ($Throttled > time());
-   }
-
-   /**
-    * This is the asynchronous callback
-    * 
-    * This method is triggerd on every page request via a callback AJAX request
-    * so that it may execute asychronously and reduce lag for users. It tracks
-    * views, handles registration for new installations, and sends stats every 
-    * day as needed.
-    * 
-    * @return void;
-    */
-   public function Tick() {
-      // Fire an event for plugins to track their own stats.
-      // TODO: Make this analyze the path and throw a specific event (this event will change in future versions).
-      $this->EventArguments['Path'] = Gdn::Request()->Post('Path');
-      $this->FireEvent('Tick');
-      
-      // Store the view, using denormalization if enabled
-      $ViewType = 'normal';
-      if (preg_match('`discussion/embed`', Gdn::Request()->Post('ResolvedPath', '')))
-         $ViewType = 'embed';
-      
-      $this->AddView($ViewType);
-      
-      if (!self::CheckIsEnabled())
-         return;
-      
-      if (Gdn::Session()->CheckPermission('Garden.Settings.Manage')) {
-         if (Gdn::Get('Garden.Analytics.Notify', FALSE) !== FALSE) {
-            $CallMessage = Sprite('Bandaid', 'InformSprite');
-            $CallMessage .= sprintf(T("There's a problem with Vanilla Analytics that needs your attention.<br/> Handle it <a href=\"%s\">here &raquo;</a>"), Url('dashboard/statistics'));
-            Gdn::Controller()->InformMessage($CallMessage, array('CssClass' => 'HasSprite'));
-         }
-      }
-      
-      $InstallationID = Gdn::InstallationID();
-      
-      // Check if we're registered with the central server already. If not, this request is 
-      // hijacked and used to perform that task instead of sending stats or recording a tick.
-      if (is_null($InstallationID)) {
-         // If the config file is not writable, gtfo
-         $ConfFile = PATH_CONF . '/config.php';
-         if (!is_writable($ConfFile)) {
-            // Admins see a helpful notice
-            if (Gdn::Session()->CheckPermission('Garden.Settings.Manage')) {
-               $Warning = Sprite('Sliders', 'InformSprite');
-               $Warning .= T('Your config.php file is not writable.<br/> Find out <a href="http://vanillaforums.org/docs/vanillastatistics">how to fix this &raquo;</a>');
-               Gdn::Controller()->InformMessage($Warning, array('CssClass' => 'HasSprite'));
+        // Allow non-standard /0 syntax
+        if ($mask == 0) {
+            if (ip2long($iP) == ip2long($net)) {
+                return true;
+            } else {
+                return false;
             }
+        }
+
+        $ip_net = ip2long($net);
+        $ip_mask = ~((1 << (32 - $mask)) - 1);
+
+        $ip_ip = ip2long($iP);
+
+        $ip_ip_net = $ip_ip & $ip_mask;
+
+        return ($ip_ip_net == $ip_net);
+    }
+
+    /**
+     *
+     *
+     * @param $response
+     * @param $raw
+     */
+    protected function doneRegister($response, $raw) {
+        $vanillaID = val('VanillaID', $response, false);
+        $secret = val('Secret', $response, false);
+        if (($secret && $vanillaID) !== false) {
+            Gdn::installationID($vanillaID);
+            Gdn::installationSecret($secret);
+            Gdn::set('Garden.Analytics.Registering', null);
+            Gdn::set('Garden.Analytics.LastSentDate', null);
+        }
+    }
+
+    /**
+     *
+     *
+     * @param $response
+     * @param $raw
+     */
+    protected function doneStats($response, $raw) {
+        $successTimeSlot = val('TimeSlot', $response, false);
+        if ($successTimeSlot !== false) {
+            self::lastSentDate($successTimeSlot);
+        }
+    }
+
+    /**
+     *
+     *
+     * @return mixed
+     */
+    public static function firstDate() {
+        $firstDate = Gdn::sql()
+            ->select('DateInserted', 'min')
+            ->from('User')
+            ->where('DateInserted >', '0000-00-00')
+            ->get()->value('DateInserted');
+        return $firstDate;
+    }
+
+    /**
+     *
+     *
+     * @param null $setLastSentDate
+     * @return mixed|null
+     */
+    public static function lastSentDate($setLastSentDate = null) {
+        static $lastSentDate = null;
+
+        // Set
+        if (!is_null($setLastSentDate)) {
+            $lastSentDate = $setLastSentDate;
+            Gdn::set('Garden.Analytics.LastSentDate', $lastSentDate);
+        }
+
+        // Lazy Load
+        if ($lastSentDate === null) {
+            $lastSentDate = Gdn::get('Garden.Analytics.LastSentDate', false);
+        }
+
+        return $lastSentDate;
+    }
+
+    /**
+     *
+     *
+     * @param $jsonResponse
+     * @param $rawResponse
+     * @param $callbacks
+     */
+    protected function parseAnalyticsResponse($jsonResponse, $rawResponse, $callbacks) {
+        // Verify signature of reply
+        $verified = $this->verifySignature($jsonResponse);
+        if ($verified === false) {
             return;
-         }
-         
-         $AttemptedRegistration = Gdn::Get('Garden.Analytics.Registering', FALSE);
-         // If we last attempted to register less than 60 seconds ago, do nothing. Could still be working.
-         if ($AttemptedRegistration !== FALSE && (time() - $AttemptedRegistration) < 60)
+        }
+
+        // Only allow commands when verification was explicitly successful
+        if ($verified === true) {
+            // Perform response commands
+            foreach ($jsonResponse as $commandName => $commandValue) {
+                switch ($commandName) {
+                    case 'DoDeregister':
+                        if ($verified) {
+                            // De-register yourself
+                            Gdn::installationID(false);
+                            Gdn::installationSecret(false);
+                        }
+                        break;
+
+                    case 'DoDisable':
+                        if ($verified) {
+                            // Turn yourself off
+                            saveToConfig('Garden.Analytics.Enabled', false);
+                        }
+                        break;
+
+                    case 'DoCall':
+                        // Call the admin's attention to the statistics
+                        Gdn::set('Garden.Analytics.Notify', $commandValue);
+                        break;
+
+                    default:
+                        // Nothing
+                        break;
+                }
+            }
+        }
+
+        if (is_string($callbacks)) {
+            // Assume a string is the Success event handler
+            $callbacks = [
+                'Success' => $callbacks
+            ];
+        }
+
+        if (!is_array($callbacks)) {
+            $callbacks = [];
+        }
+
+        // Assume strings are local methods
+        foreach ($callbacks as $event => &$callbackMethod) {
+            if (is_string($callbackMethod)) {
+                $callbackMethod = [$this, $callbackMethod];
+            }
+        }
+
+        $responseCode = val('Status', $jsonResponse, 500);
+        $callbackExecute = null;
+        switch ($responseCode) {
+            case false:
+            case 500:
+                if (array_key_exists('Failure', $callbacks)) {
+                    $callbackExecute = $callbacks['Failure'];
+                }
+                break;
+
+            case true:
+            case 200:
+                self::throttled(false);
+                if (array_key_exists('Success', $callbacks)) {
+                    $callbackExecute = $callbacks['Success'];
+                }
+                break;
+        }
+
+        if (!is_null($callbackExecute)) {
+            call_user_func($callbackExecute, $jsonResponse, $rawResponse);
+        }
+    }
+
+    /**
+     *
+     */
+    public function register() {
+        // Set the time we last attempted to perform registration
+        Gdn::set('Garden.Analytics.Registering', time());
+
+        // Request registration from remote server
+        $request = [];
+        $this->basicParameters($request);
+        $this->analytics('Register', $request, [
+            'Success' => 'DoneRegister',
+            'Failure' => 'AnalyticsFailed'
+        ]);
+    }
+
+    /**
+     * Sign a request or response.
+     *
+     * Uses the known site secret to sign the given request or response. The
+     * request/response is passed in by reference so that it can be augmented with the signature.
+     *
+     * @param array $request The request array to be signed
+     * @param boolean $modify Optional whether or not to modify the request in place (default false)
+     */
+    public function sign(&$request, $modify = false) {
+        // Fail if no ID is present
+        $vanillaID = getValue('VanillaID', $request, false);
+        if (empty($vanillaID)) {
+            return false;
+        }
+
+        if ($vanillaID != Gdn::installationID()) {
+            return false;
+        }
+
+        // We're going to work on a copy for now
+        $signatureArray = $request;
+
+        // Build the request time
+        $requestTime = Gdn_Statistics::time();
+        // Get the secret key
+        $requestSecret = Gdn::installationSecret();
+
+        // Remove the hash from the request data before checking or building the signature
+        unset($signatureArray['SecurityHash']);
+
+        // Add the real secret and request time
+        $signatureArray['Secret'] = $requestSecret;
+        $signatureArray['RequestTime'] = $requestTime;
+
+        $signData = array_intersect_key($signatureArray, array_fill_keys([
+            'VanillaID',
+            'Secret',
+            'RequestTime',
+            'TimeSlot'
+        ], null));
+
+        // ksort the array to preserve a known order
+        $signData = array_change_key_case($signData, CASE_LOWER);
+        ksort($signData);
+
+        // Calculate the hash
+        $realHash = sha1(http_build_query($signData));
+
+        if ($modify) {
+            $request['RequestTime'] = $requestTime;
+            $request['SecurityHash'] = $realHash;
+            ksort($request);
+        }
+
+        return $realHash;
+    }
+
+    /**
+     *
+     *
+     * @throws Exception
+     */
+    protected function stats() {
+        $startTime = time();
+        $request = [];
+        $this->basicParameters($request);
+
+        $vanillaID = Gdn::installationID();
+        $vanillaSecret = Gdn::installationSecret();
+        // Don't try to send stats if we don't have a proper install
+        if (is_null($vanillaID) || is_null($vanillaSecret)) {
             return;
+        }
 
-         return $this->Register();
-      }
-      
-      // If we get here, the installation is registered and we can decide on whether or not to send stats now.
-      $LastSentDate = self::LastSentDate();
-      if (empty($LastSentDate) || $LastSentDate < date('Ymd', strtotime('-1 day')))
-         return $this->Stats();
-   }
+        // Always look at stats for the day following the previous successful send.
+        $lastSentDate = self::lastSentDate();
+        if ($lastSentDate === false) { // Never sent
+            $statsDate = strtotime('yesterday');
+        } else {
+            $statsDate = strtotime('+1 day', self::timeFromTimeSlot($lastSentDate));
+        }
 
-   /**
-    * Increments overall pageview view count
-    *
-    * @since 2.1a
-    * @access public
-    */
-   public function AddView($ViewType = 'normal') {
-      // Add a pageview entry.
-      $TimeSlot = date('Ymd');
-      $Px = Gdn::Database()->DatabasePrefix;
-      
-      $Views = 1;
-      $EmbedViews = 0;
-      
-      try {
-         if (C('Garden.Analytics.Views.Denormalize', FALSE) && Gdn::Cache()->ActiveEnabled()) {
-            $CacheKey = "QueryCache.Analytics.CountViews";
-            
-            // Increment. If not success, create key.
-            $Incremented = Gdn::Cache()->Increment($CacheKey);
-            if ($Incremented === Gdn_Cache::CACHEOP_FAILURE)
-               Gdn::Cache()->Store($CacheKey, 1);
-            
-            // Get current cache value
-            $Views = Gdn::Cache()->Get($CacheKey);
-            
-            if ($ViewType == 'embed') {
-               $EmbedCacheKey = "QueryCache.Analytics.CountEmbedViews";
+        $statsTimeSlot = date('Ymd', $statsDate);
+        if ($statsTimeSlot >= date('Ymd')) {
+            return;
+        }
 
-               // Increment. If not success, create key.
-               $EmbedIncremented = Gdn::Cache()->Increment($EmbedCacheKey);
-               if ($EmbedIncremented === Gdn_Cache::CACHEOP_FAILURE)
-                  Gdn::Cache()->Store($EmbedCacheKey, 1);
+        $detectActiveInterval = 0;
+        $maxIterations = 10;
+        $timeSlotLimit = date('Ymd');
+        do {
+            $timeSlot = date('Ymd', $statsDate);
 
-               // Get current cache value
-               $EmbedViews = Gdn::Cache()->Get($EmbedCacheKey);
+            // We're caught up to today. Stop looping.
+            if ($timeSlot >= $timeSlotLimit) {
+                break;
             }
-            
-            // Every X views, writeback to AnalyticsLocal
-            $DenormalizeWriteback = C('Garden.Analytics.Views.DenormalizeWriteback', 10);
-            if (($Views % $DenormalizeWriteback) == 0) {
-               Gdn::Controller()->SetData('WritebackViews', $Views);
-               Gdn::Controller()->SetData('WritebackEmbed', $EmbedViews);
-                  
-               Gdn::Database()->Query("insert into {$Px}AnalyticsLocal (TimeSlot, Views, EmbedViews) values (:TimeSlot, {$Views}, {$EmbedViews})
-               on duplicate key update 
-                  Views = COALESCE(Views, 0)+{$Views}, 
-                  EmbedViews = COALESCE(EmbedViews, 0)+{$EmbedViews}", 
-               array(
-                  ':TimeSlot' => $TimeSlot
-               ));
-               
-               // ... and get rid of those views from the keys
-               
-               if ($Views)
-                  Gdn::Cache()->Decrement($CacheKey, $Views);
-               
-               if ($EmbedViews)
-                  Gdn::Cache()->Decrement($EmbedCacheKey, $EmbedViews);
+
+            $dayStart = date('Y-m-d 00:00:00', $statsDate);
+            $dayEnd = date('Y-m-d 23:59:59', $statsDate);
+
+            // Get relevant stats
+            $numComments = Gdn::sql()
+                ->select('DateInserted', 'COUNT', 'Hits')
+                ->from('Comment')
+                ->where('DateInserted>=', $dayStart)
+                ->where('DateInserted<', $dayEnd)
+                ->get()->firstRow(DATASET_TYPE_ARRAY);
+            $numComments = val('Hits', $numComments, null);
+
+            $numDiscussions = Gdn::sql()
+                ->select('DateInserted', 'COUNT', 'Hits')
+                ->from('Discussion')
+                ->where('DateInserted>=', $dayStart)
+                ->where('DateInserted<', $dayEnd)
+                ->get()->firstRow(DATASET_TYPE_ARRAY);
+            $numDiscussions = val('Hits', $numDiscussions, null);
+
+            // Count the number of commenters that ONLY commented.
+            $numCommenters = Gdn::sql()
+                ->select('distinct c.InsertUserID', 'COUNT', 'Hits')
+                ->from('Comment c')
+                ->join('Discussion d', 'c.DiscussionID = d.DiscussionID')
+                ->where('c.InsertUserID<>', 'd.InsertUserID', false, false)
+                ->where('c.DateInserted>=', $dayStart)
+                ->where('c.DateInserted<', $dayEnd)
+                ->get()->value('Hits', null);
+
+            // Count the number of users that have started a discussion.
+            $numDiscussioners = Gdn::sql()
+                ->select('distinct InsertUserID', 'COUNT', 'Hits')
+                ->from('Discussion d')
+                ->where('DateInserted>=', $dayStart)
+                ->where('DateInserted<', $dayEnd)
+                ->get()->value('Hits', null);
+            if ($numDiscussioners === null && $numCommenters === null) {
+                $numContributors = null;
+            } else {
+                $numContributors = $numCommenters + $numDiscussioners;
             }
-         } else {
-            $ExtraViews = 1;
-            $ExtraEmbedViews = ($ViewType == 'embed') ? 1 : 0;
-            
-            Gdn::Database()->Query("insert into {$Px}AnalyticsLocal (TimeSlot, Views, EmbedViews) values (:TimeSlot, {$ExtraViews}, {$ExtraEmbedViews})
-               on duplicate key update 
-                  Views = COALESCE(Views, 0)+{$ExtraViews}, 
-                  EmbedViews = COALESCE(EmbedViews, 0)+{$ExtraEmbedViews}", 
-            array(
-               ':TimeSlot' => $TimeSlot
-            ));
-         }
-      } catch (Exception $Ex) {
-         if (Gdn::Session()->CheckPermission('Garden.Settings.Manage'))
-            throw $Ex;
-      }
-   }
 
-   public static function Time() {
-      return time();
-   }
+            $numUsers = Gdn::sql()
+                ->select('DateInserted', 'COUNT', 'Hits')
+                ->from('User')
+                ->where('DateInserted>=', $dayStart)
+                ->where('DateInserted<', $dayEnd)
+                ->get()->firstRow(DATASET_TYPE_ARRAY);
+            $numUsers = val('Hits', $numUsers, null);
 
-   public static function TimeSlot($SlotType = 'd', $Timestamp = FALSE) {
-      if (!$Timestamp)
-         $Timestamp = self::Time();
+            $numViewsData = Gdn::sql()
+                ->select('Views, EmbedViews')
+                ->from('AnalyticsLocal')
+                ->where('TimeSlot', $timeSlot)
+                ->get()->firstRow(DATASET_TYPE_ARRAY);
 
-      if ($SlotType == 'd')
-         $Result = gmdate('Ymd', $Timestamp);
-      elseif ($SlotType == 'w') {
-         $Sub = gmdate('N', $Timestamp) - 1;
-         $Timestamp = strtotime("-$Sub days", $Timestamp);
-         $Result = gmdate('Ymd', $Timestamp);
-      } elseif ($SlotType == 'm')
-         $Result = gmdate('Ym', $Timestamp) . '00';
-      elseif ($SlotType == 'y')
-         $Result = gmdate('Y', $Timestamp) . '0000';
-      elseif ($SlotType == 'a')
-         $Result = '00000000';
+            $numViews = val('Views', $numViewsData, null);
+            $numEmbedViews = val('EmbedViews', $numViewsData, null);
 
-      return $Result;
-   }
+            $detectActiveInterval = array_sum([
+                $numComments,
+                $numContributors,
+                $numDiscussions,
+                $numUsers,
+                $numViews,
+                $numEmbedViews
+            ]);
 
-   public static function TimeSlotAdd($SlotType, $Number, $Timestamp = FALSE) {
-      $Timestamp = self::TimeSlotStamp($SlotType, $Timestamp);
-      $Result = strtotime(sprintf('%+d %s', $Number, self::$Increments[$SlotType]), $Timestamp);
-      return $Result;
-   }
+            $statsDate = strtotime('+1 day', $statsDate);
+            $maxIterations--;
+            $runningTime = time() - $startTime;
+        } while ($detectActiveInterval == 0 && $maxIterations && $runningTime <= 30);
 
-   public static function TimeSlotBounds($SlotType = 'd', $Timestamp = FALSE) {
-      $From = self::TimeSlotStamp($SlotType, $Timestamp);
-      $To = strtotime('+1 ' . self::$Increments[$SlotType], $From);
-      return array($From, $To);
-   }
+        if ($detectActiveInterval == 0) {
+            // We've looped $MaxIterations times or up until yesterday and couldn't find any stats. Remember our place and return.
+            self::lastSentDate($timeSlot);
+            return;
+        }
 
-   public static function TimeSlotStamp($SlotType = 'd', $Timestamp = FALSE) {
-      $Result = self::TimeFromTimeSlot(self::TimeSlot($SlotType, $Timestamp));
-      return $Result;
-   }
+        // Assemble Stats
+        $request = array_merge($request, [
+            'VanillaID' => $vanillaID,
+            'TimeSlot' => $timeSlot,
+            'CountComments' => $numComments,
+            'CountAllContributors' => $numContributors,
+            'CountDiscussions' => $numDiscussions,
+            'CountUsers' => $numUsers,
+            'CountViews' => $numViews,
+            'CountEmbedViews' => $numEmbedViews
+        ]);
 
-   public static function TimeFromTimeSlot($TimeSlot) {
-      if ($TimeSlot == '00000000')
-         return 0;
+        // Send stats to remote server
+        $this->analytics('Stats', $request, [
+            'Success' => 'DoneStats',
+            'Failure' => 'AnalyticsFailed'
+        ]);
+    }
 
-      $Year = substr($TimeSlot, 0, 4);
-      $Month = substr($TimeSlot, 4, 2);
-      $Day = (int) substr($TimeSlot, 6, 2);
-      if ($Day == 0)
-         $Day = 1;
-      $DateRaw = mktime(0, 0, 0, $Month, $Day, $Year);
+    /**
+     *
+     *
+     * @param null $setThrottled
+     * @return bool
+     */
+    public static function throttled($setThrottled = null) {
+        static $throttled = null;
 
-      if ($DateRaw === FALSE)
-         throw new Exception("Invalid timeslot '{$TimeSlot}', unable to convert to epoch");
+        // Set
+        if (!is_null($setThrottled)) {
+            if ($setThrottled) {
+                $throttleDelay = c('Garden.Analytics.ThrottleDelay', 3600);
+                $throttleValue = time() + $throttleDelay;
+            } else {
+                $throttleValue = null;
+            }
+            $throttled = (!is_null($throttleValue)) ? $throttleValue : 0;
+            Gdn::set('Garden.Analytics.Throttle', $throttleValue);
+        }
 
-      return $DateRaw;
-   }
+        // Lazy Load
+        if ($throttled === null) {
+            $throttled = Gdn::get('Garden.Analytics.Throttle', 0);
+        }
 
-   public static function TimeFromExtendedTimeSlot($TimeSlot, $Resolution = 'auto') {
-      if ($TimeSlot == '00000000')
-         return 0;
+        return ($throttled > time());
+    }
 
-      list($Year, $Month, $Day, $Hour, $Minute) = array(1, 1, 1, 0, 0);
-      if ($Resolution == 'auto')
-         $TimeslotLength = strlen($TimeSlot);
-      else
-         $TimeslotLength = $Resolution;
-      
-      if ($TimeslotLength >= 4)
-         $Year = substr($TimeSlot, 0, 4);
-      
-      if ($TimeslotLength >= 6)
-         $Month = substr($TimeSlot, 4, 2);
-      
-      if ($TimeslotLength >= 8)
-         $Day = (int) substr($TimeSlot, 6, 2);
-      if ($Day == 0) $Day = 1;
-      
-      if ($TimeslotLength >= 10)
-         $Hour = (int) substr($TimeSlot, 8, 2);
-      
-      if ($TimeslotLength >= 12)
-         $Minute = (int) substr($TimeSlot, 10, 2);
-      
-      $DateRaw = mktime($Hour, $Minute, 0, $Month, $Day, $Year);
+    /**
+     * This is the asynchronous callback.
+     *
+     * This method is triggerd on every page request via a callback AJAX request
+     * so that it may execute asychronously and reduce lag for users. It tracks
+     * views, handles registration for new installations, and sends stats every day as needed.
+     *
+     * @return void
+     */
+    public function tick() {
+        // Fire an event for plugins to track their own stats.
+        // TODO: Make this analyze the path and throw a specific event (this event will change in future versions).
+        $this->EventArguments['Path'] = Gdn::request()->post('Path');
+        $this->fireEvent('Tick');
 
-      if ($DateRaw === FALSE)
-         throw new Exception("Invalid timeslot '{$TimeSlot}', unable to convert to epoch");
+        // Store the view, using denormalization if enabled
+        $viewType = 'normal';
+        if (preg_match('`discussion/embed`', Gdn::request()->post('ResolvedPath', ''))) {
+            $viewType = 'embed';
+        }
 
-      return $DateRaw;
-   }
+        $this->addView($viewType);
 
-   public function ValidateCredentials() {
-      $Request = array();
-      $this->BasicParameters($Request);
+        if (Gdn::session()->isValid()) {
+            Gdn::userModel()->updateVisit(Gdn::session()->UserID);
+        }
 
-      $VanillaID = Gdn::InstallationID();
-      $VanillaSecret = Gdn::InstallationSecret();
-      // Don't try to send stats if we don't have a proper install
-      if (is_null($VanillaID) || is_null($VanillaSecret))
-         return FALSE;
+        if (!self::checkIsEnabled()) {
+            return;
+        }
 
-      $Request = array_merge($Request, array(
-         'VanillaID' => $VanillaID
-      ));
+        if (Gdn::session()->checkPermission('Garden.Settings.Manage')) {
+            if (Gdn::get('Garden.Analytics.Notify', false) !== false) {
+                $callMessage = sprite('Bandaid', 'InformSprite');
+                $callMessage .= sprintf(t("There's a problem with Vanilla Analytics that needs your attention.<br/> Handle it <a href=\"%s\">here &raquo;</a>"), url('dashboard/statistics'));
+                Gdn::controller()->informMessage($callMessage, ['CssClass' => 'HasSprite']);
+            }
+        }
 
-      $Response = $this->Analytics('Verify', $Request, FALSE);
-      $Status = GetValue('Status', $Response, 404);
+        $installationID = Gdn::installationID();
 
-      if ($Status == 200)
-         return TRUE;
-      return FALSE;
-   }
+        // Check if we're registered with the central server already. If not, this request is
+        // hijacked and used to perform that task instead of sending stats or recording a tick.
+        if (is_null($installationID)) {
+            // If the config file is not writable, gtfo
+            $confFile = PATH_CONF.'/config.php';
+            if (!is_writable($confFile)) {
+                // Admins see a helpful notice
+                if (Gdn::session()->checkPermission('Garden.Settings.Manage')) {
+                    $warning = sprite('Sliders', 'InformSprite');
+                    $warning .= t('Your config.php file is not writable.');
+                    Gdn::controller()->informMessage($warning, ['CssClass' => 'HasSprite']);
+                }
+                return;
+            }
 
-   /**
-    * Signature check
-    * 
-    * This method checks the supplied signature of a request against a hash of
-    * the request arguments augmented with the local secret from the config file.
-    * 
-    * ****
-    * THIS METHOD USES ALL SUPPLIED ARGUMENTS IN ITS SIGNATURE HASH ALGORITHM
-    * ****
-    * 
-    * @param type $Request Array of request parameters
-    * @return boolean Status of verification check, or null if no VanillaID
-    */
-   protected function VerifySignature($Request) {
+            $attemptedRegistration = Gdn::get('Garden.Analytics.Registering', false);
+            // If we last attempted to register less than 60 seconds ago, do nothing. Could still be working.
+            if ($attemptedRegistration !== false && (time() - $attemptedRegistration) < 60) {
+                return;
+            }
 
-      // If this response has no ID, return NULL (could not verify)
-      $VanillaID = GetValue('VanillaID', $Request, NULL);
-      if (is_null($VanillaID))
-         return NULL;
+            return $this->register();
+        }
 
-      // Response is bogus - wrong InstallationID
-      if (!is_null(Gdn::InstallationID()) && $VanillaID != Gdn::InstallationID())
-         return FALSE;
+        // If we get here, the installation is registered and we can decide on whether or not to send stats now.
+        $lastSentDate = self::lastSentDate();
+        if (empty($lastSentDate) || $lastSentDate < date('Ymd', strtotime('-1 day'))) {
+            return $this->stats();
+        }
+    }
 
-      // If we don't have a secret, we cannot verify anyway
-      $VanillaSecret = Gdn::InstallationSecret();
-      if (is_null($VanillaSecret))
-         return NULL;
+    /**
+     * Increments overall pageview view count.
+     *
+     * @since 2.1a
+     * @access public
+     */
+    public function addView($viewType = 'normal') {
+        // Add a pageview entry.
+        $timeSlot = date('Ymd');
+        $px = Gdn::database()->DatabasePrefix;
 
-      // Calculate clock desync
-      $CurrentGmTime = Gdn_Statistics::Time();
-      $RequestTime = GetValue('RequestTime', $Request, 0);
-      $TimeDiff = abs($CurrentGmTime - $RequestTime);
-      $AllowedTimeDiff = C('Garden.Analytics.RequestTimeout', 1440);
+        $views = 1;
+        $embedViews = 0;
 
-      // Allow 24* minutes of clock desync, otherwise signature is invalid
-      if ($TimeDiff > $AllowedTimeDiff)
-         return FALSE;
+        try {
+            if (c('Garden.Analytics.Views.Denormalize', false) &&
+                Gdn::cache()->activeEnabled() &&
+                Gdn::cache()->type() != Gdn_Cache::CACHE_TYPE_NULL
+            ) {
+                $cacheKey = "QueryCache.Analytics.CountViews";
 
-      $SecurityHash = GetValue('SecurityHash', $Request);
+                // Increment.
+                $incremented = Gdn::cache()->increment($cacheKey, 1, [Gdn_Cache::FEATURE_INITIAL => 1]);
 
-      // Remove the existing SecuritHash before calculating the signature
-      unset($Request['SecurityHash']);
-      // Add the real secret
-      $Request['Secret'] = $VanillaSecret;
+                // Get current cache value
+                $views = Gdn::cache()->get($cacheKey);
 
-      $SignData = array_intersect_key($Request, array_fill_keys(array(
-         'VanillaID',
-         'Secret',
-         'RequestTime',
-         'TimeSlot'
-      ), NULL));
+                if ($viewType == 'embed') {
+                    $embedCacheKey = "QueryCache.Analytics.CountEmbedViews";
 
-      // ksort the array to preserve a known order
-      $SignData = array_change_key_case($SignData, CASE_LOWER);
-      ksort($SignData);
+                    // Increment.
+                    $embedIncremented = Gdn::cache()->increment($embedCacheKey, 1, [Gdn_Cache::FEATURE_INITIAL => 1]);
 
-      // Calculate the hash
-      $RealHash = sha1(http_build_query($SignData));
+                    // Get current cache value
+                    $embedViews = Gdn::cache()->get($embedCacheKey);
+                }
 
-      if ($RealHash == $SecurityHash)
-         return TRUE;
+                // Every X views, writeback to AnalyticsLocal
+                $denormalizeWriteback = c('Garden.Analytics.Views.DenormalizeWriteback', 10);
+                if (($views % $denormalizeWriteback) == 0) {
+                    Gdn::controller()->setData('WritebackViews', $views);
+                    Gdn::controller()->setData('WritebackEmbed', $embedViews);
 
-      return FALSE;
-   }
+                    Gdn::database()->query(
+                        "insert into {$px}AnalyticsLocal (TimeSlot, Views, EmbedViews) values (:TimeSlot, {$views}, {$embedViews})
+               on duplicate key update
+                  Views = COALESCE(Views, 0)+{$views},
+                  EmbedViews = COALESCE(EmbedViews, 0)+{$embedViews}",
+                        [
+                            ':TimeSlot' => $timeSlot
+                        ]
+                    );
 
+                    // ... and get rid of those views from the keys
+
+                    if ($views) {
+                        Gdn::cache()->decrement($cacheKey, $views);
+                    }
+
+                    if ($embedViews) {
+                        Gdn::cache()->decrement($embedCacheKey, $embedViews);
+                    }
+                }
+            } else {
+                $extraViews = 1;
+                $extraEmbedViews = ($viewType == 'embed') ? 1 : 0;
+
+                Gdn::database()->query(
+                    "insert into {$px}AnalyticsLocal (TimeSlot, Views, EmbedViews) values (:TimeSlot, {$extraViews}, {$extraEmbedViews})
+               on duplicate key update
+                  Views = COALESCE(Views, 0)+{$extraViews},
+                  EmbedViews = COALESCE(EmbedViews, 0)+{$extraEmbedViews}",
+                    [
+                        ':TimeSlot' => $timeSlot
+                    ]
+                );
+            }
+        } catch (Exception $ex) {
+            if (Gdn::session()->checkPermission('Garden.Settings.Manage')) {
+                throw $ex;
+            }
+        }
+    }
+
+    /**
+     *
+     *
+     * @return int
+     */
+    public static function time() {
+        return CurrentTimeStamp::get();
+    }
+
+    /**
+     *
+     *
+     * @param string $slotType
+     * @param bool $timestamp
+     * @return string
+     */
+    public static function timeSlot($slotType = 'd', $timestamp = false) {
+        if (!$timestamp) {
+            $timestamp = self::time();
+        }
+
+        if ($slotType == 'd') {
+            $result = gmdate('Ymd', $timestamp);
+        } elseif ($slotType == 'w') {
+            $sub = gmdate('N', $timestamp) - 1;
+            $timestamp = strtotime("-$sub days", $timestamp);
+            $result = gmdate('Ymd', $timestamp);
+        } elseif ($slotType == 'm')
+            $result = gmdate('Ym', $timestamp).'00';
+        elseif ($slotType == 'y')
+            $result = gmdate('Y', $timestamp).'0000';
+        elseif ($slotType == 'a')
+            $result = '00000000';
+
+        return $result;
+    }
+
+    /**
+     *
+     *
+     * @param $slotType
+     * @param $number
+     * @param bool $timestamp
+     * @return int
+     */
+    public static function timeSlotAdd($slotType, $number, $timestamp = false) {
+        $timestamp = self::timeSlotStamp($slotType, $timestamp);
+        $result = strtotime(sprintf('%+d %s', $number, self::$Increments[$slotType]), $timestamp);
+        return $result;
+    }
+
+    /**
+     *
+     *
+     * @param string $slotType
+     * @param bool $timestamp
+     * @return array
+     */
+    public static function timeSlotBounds($slotType = 'd', $timestamp = false) {
+        $from = self::timeSlotStamp($slotType, $timestamp);
+        $to = strtotime('+1 '.self::$Increments[$slotType], $from);
+        return [$from, $to];
+    }
+
+    /**
+     *
+     *
+     * @param string $slotType
+     * @param bool $timestamp
+     * @return int
+     * @throws Exception
+     */
+    public static function timeSlotStamp($slotType = 'd', $timestamp = false) {
+        $result = self::timeFromTimeSlot(self::timeSlot($slotType, $timestamp));
+        return $result;
+    }
+
+    /**
+     *
+     *
+     * @param $timeSlot
+     * @return int
+     * @throws Exception
+     */
+    public static function timeFromTimeSlot($timeSlot) {
+        if ($timeSlot == '00000000') {
+            return 0;
+        }
+
+        $year = substr($timeSlot, 0, 4);
+        $month = substr($timeSlot, 4, 2);
+        $day = (int)substr($timeSlot, 6, 2);
+        if ($day == 0) {
+            $day = 1;
+        }
+        $dateRaw = mktime(0, 0, 0, $month, $day, $year);
+
+        if ($dateRaw === false) {
+            throw new Exception("Invalid timeslot '{$timeSlot}', unable to convert to epoch");
+        }
+
+        return $dateRaw;
+    }
+
+    /**
+     *
+     *
+     * @param $timeSlot
+     * @param string $resolution
+     * @return int
+     * @throws Exception
+     */
+    public static function timeFromExtendedTimeSlot($timeSlot, $resolution = 'auto') {
+        if ($timeSlot == '00000000') {
+            return 0;
+        }
+
+        [$year, $month, $day, $hour, $minute] = [1, 1, 1, 0, 0];
+        if ($resolution == 'auto') {
+            $timeslotLength = strlen($timeSlot);
+        } else {
+            $timeslotLength = $resolution;
+        }
+
+        if ($timeslotLength >= 4) {
+            $year = substr($timeSlot, 0, 4);
+        }
+
+        if ($timeslotLength >= 6) {
+            $month = substr($timeSlot, 4, 2);
+        }
+
+        if ($timeslotLength >= 8) {
+            $day = (int)substr($timeSlot, 6, 2);
+        }
+        if ($day == 0) {
+            $day = 1;
+        }
+
+        if ($timeslotLength >= 10) {
+            $hour = (int)substr($timeSlot, 8, 2);
+        }
+
+        if ($timeslotLength >= 12) {
+            $minute = (int)substr($timeSlot, 10, 2);
+        }
+
+        $dateRaw = mktime($hour, $minute, 0, $month, $day, $year);
+
+        if ($dateRaw === false) {
+            throw new Exception("Invalid timeslot '{$timeSlot}', unable to convert to epoch");
+        }
+
+        return $dateRaw;
+    }
+
+    /**
+     *
+     *
+     * @return bool
+     */
+    public function validateCredentials() {
+        $request = [];
+        $this->basicParameters($request);
+
+        $vanillaID = Gdn::installationID();
+        $vanillaSecret = Gdn::installationSecret();
+        // Don't try to send stats if we don't have a proper install
+        if (is_null($vanillaID) || is_null($vanillaSecret)) {
+            return false;
+        }
+
+        $request = array_merge($request, [
+            'VanillaID' => $vanillaID
+        ]);
+
+        $response = $this->analytics('Verify', $request, false);
+        $status = val('Status', $response, 404);
+
+        if ($status == 200) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Signature check.
+     *
+     * This method checks the supplied signature of a request against a hash of
+     * the request arguments augmented with the local secret from the config file.
+     *
+     * ****
+     * THIS METHOD USES ALL SUPPLIED ARGUMENTS IN ITS SIGNATURE HASH ALGORITHM
+     * ****
+     *
+     * @param array $request Array of request parameters
+     * @return boolean Status of verification check, or null if no VanillaID
+     */
+    protected function verifySignature($request) {
+
+        // If this response has no ID, return NULL (could not verify)
+        $vanillaID = getValue('VanillaID', $request, null);
+        if (is_null($vanillaID)) {
+            return null;
+        }
+
+        // Response is bogus - wrong InstallationID
+        if (!is_null(Gdn::installationID()) && $vanillaID != Gdn::installationID()) {
+            return false;
+        }
+
+        // If we don't have a secret, we cannot verify anyway
+        $vanillaSecret = Gdn::installationSecret();
+        if (is_null($vanillaSecret)) {
+            return null;
+        }
+
+        // Calculate clock desync
+        $currentGmTime = Gdn_Statistics::time();
+        $requestTime = val('RequestTime', $request, 0);
+        $timeDiff = abs($currentGmTime - $requestTime);
+        $allowedTimeDiff = c('Garden.Analytics.RequestTimeout', 1440);
+
+        // Allow 24* minutes of clock desync, otherwise signature is invalid
+        if ($timeDiff > $allowedTimeDiff) {
+            return false;
+        }
+
+        $securityHash = val('SecurityHash', $request);
+
+        // Remove the existing SecuritHash before calculating the signature
+        unset($request['SecurityHash']);
+        // Add the real secret
+        $request['Secret'] = $vanillaSecret;
+
+        $signData = array_intersect_key($request, array_fill_keys([
+            'VanillaID',
+            'Secret',
+            'RequestTime',
+            'TimeSlot'
+        ], null));
+
+        // ksort the array to preserve a known order
+        $signData = array_change_key_case($signData, CASE_LOWER);
+        ksort($signData);
+
+        // Calculate the hash
+        $realHash = sha1(http_build_query($signData));
+
+        if ($realHash == $securityHash) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Generate an access token for stats graphs.
+     *
+     * @return bool|string Returns a token or **false** if required information is missing.
+     */
+    public static function generateToken() {
+        $id = Gdn::installationID();
+        $secret = Gdn::installationSecret();
+        if (empty($id) || empty($secret)) {
+            return false;
+        }
+
+        $str = 'v1.'.dechex(time());
+        $token = $str.'.'.hash_hmac('sha1', $str, $secret);
+        return $token;
+    }
 }

@@ -1,57 +1,89 @@
-<?php if (!defined('APPLICATION')) exit();
-/**
- * @copyright Copyright 2008, 2009 Vanilla Forums Inc.
- * @license http://www.opensource.org/licenses/gpl-2.0.php GPLv2
- * @package Dashboard
- */
-
+<?php
 /**
  * Provides a way to widgetize modules.
  *
+ * @copyright 2009-2019 Vanilla Forums Inc.
+ * @license GPL-2.0-only
  * @package Dashboard
+ * @since 2.0
+ */
+
+/**
+ * Handles /module endpoint.
  */
 class ModuleController extends Gdn_Controller {
-   /**
-    * Creates and renders an instance of a module.
-    */
-   public function Index($Module, $AppFolder = '', $DeliveryType = '') {
-      if (!$DeliveryType)
-         $this->DeliveryType(DELIVERY_TYPE_VIEW);
-      
-      $ModuleClassExists = class_exists($Module);
+    /**
+     * {@inheritDoc}
+     */
+    public function initialize() {
+        $this->Head = new HeadModule($this);
+        $this->addJsFile('jquery.js');
+        $this->addJsFile('jquery.form.js');
+        $this->addJsFile('jquery.popup.js');
+        $this->addJsFile('jquery.gardenhandleajaxform.js');
+        $this->addJsFile('jquery.autosize.min.js');
+        $this->addJsFile('global.js');
+        $this->addJsFile('cropimage.js');
+        $this->addJsFile('vendors/clipboard.min.js');
 
-      if ($ModuleClassExists) {
-         // Make sure that the class implements Gdn_IModule
-         $ReflectionClass = new ReflectionClass($Module);
-         if ($ReflectionClass->implementsInterface("Gdn_IModule")) {
-            // Set the proper application folder on this controller so that things render properly.
-            if ($AppFolder) {
-               $this->ApplicationFolder = $AppFolder;
-            } else {
-               $Filename = str_replace('\\', '/', substr($ReflectionClass->getFileName(), strlen(PATH_ROOT)));
-               // Figure our the application folder for the module.
-               $Parts = explode('/', trim($Filename, '/'));
-               if ($Parts[0] == 'applications') {
-                  $this->ApplicationFolder = $Parts[1];
-               }
+        $this->addCssFile('style.css');
+        $this->addCssFile('vanillicon.css', 'static');
+        parent::initialize();
+    }
+
+    /**
+     * Creates and renders an instance of a module.
+     *
+     * @param string $module
+     * @param string $appFolder
+     * @param string $deliveryType
+     */
+    public function index($module, $appFolder = '', $deliveryType = '') {
+        if (!$deliveryType) {
+            $this->deliveryType(DELIVERY_TYPE_VIEW);
+        }
+
+        $moduleClassExists = class_exists($module);
+
+        if ($moduleClassExists) {
+            // Make sure that the class implements Gdn_IModule
+            $reflectionClass = new ReflectionClass($module);
+            if ($reflectionClass->implementsInterface("Gdn_IModule")) {
+                // Check any incoming app folder against real application list.
+                $appWhitelist = Gdn::applicationManager()->enabledApplicationFolders();
+
+                // Set the proper application folder on this controller so that things render properly.
+                if ($appFolder && in_array($appFolder, $appWhitelist)) {
+                    $this->ApplicationFolder = $appFolder;
+                } else {
+                    $filename = str_replace('\\', '/', substr($reflectionClass->getFileName(), strlen(PATH_ROOT)));
+                    // Figure our the application folder for the module.
+                    $parts = explode('/', trim($filename, '/'));
+                    if ($parts[0] == 'applications' && in_array($parts[1], $appWhitelist)) {
+                        $this->ApplicationFolder = $parts[1];
+                    }
+                }
+
+
+                $moduleInstance = new $module($this);
+                $moduleInstance->Visible = true;
+
+                $whiteList = ['Limit', 'Help'];
+                foreach ($this->Request->get() as $key => $value) {
+                    if (in_array($key, $whiteList)) {
+                        // Set a sane max limit for this open-ended way of calling modules.
+                        if ($key == 'Limit' && $value > 200) {
+                            throw new Exception(t('Invalid limit.'), 400);
+                        }
+                        $moduleInstance->$key = $value;
+                    }
+                }
+
+                $this->setData('_Module', $moduleInstance);
+                $this->render('Index', false, 'dashboard');
+                return;
             }
-
-
-            $ModuleInstance = new $Module($this);
-            $ModuleInstance->Visible = TRUE;
-            
-            $WhiteList = array('Limit', 'Help');
-            foreach ($this->Request->Get() as $Key => $Value) {
-               if (in_array($Key, $WhiteList)) {
-                  $ModuleInstance->$Key = $Value;
-               }
-            }
-            
-            $this->SetData('_Module', $ModuleInstance);
-            $this->Render('Index', FALSE, 'dashboard');
-            return;
-         }
-      }
-      throw NotFoundException($Module);
-   }
+        }
+        throw notFoundException(htmlspecialchars($module));
+    }
 }

@@ -1,75 +1,138 @@
 <?php if (!defined('APPLICATION')) exit();
 
+/** @var ConfigurationModule $Sf */
 $Sf = $this->ConfigurationModule;
-$Form = $Sf->Form();
+/* @var Gdn_Form $Form */
+$Form = $Sf->form();
 
 if ($Sf->RenderAll) {
-   echo '<h1>', $Sf->Controller()->Data('Title'), '</h1>';
+    echo '<h1>', $Sf->controller()->data('Title'), '</h1>';
+    if ($Sf->controller()->data('Description')) {
+        echo '<div class="padded">', $Sf->controller()->data('Description'), '</div>';
+    }
 }
 
-$Options = array();
-if ($Sf->HasFiles())
-   $Options['enctype'] = 'multipart/form-data';
+$Options = [];
+if ($Sf->hasFiles()) {
+    $Options['enctype'] = 'multipart/form-data';
+}
 
-echo $Form->Open($Options);
-echo $Form->Errors();
+echo $Form->open($Options);
+echo $Form->errors();
 ?>
 <ul>
-   <?php
-   
-   foreach ($Sf->Schema() as $Row) {
-      echo "<li>\n  ";
+    <?php
 
-      $LabelCode = $Sf->LabelCode($Row);
-      $Description = GetValue('Description', $Row, '');
-      if ($Description)
-         $Description = '<div class="Info">'.$Description.'</div>';
+    foreach ($Sf->schema() as $Row) {
 
-      switch (strtolower($Row['Control'])) {
-         case 'categorydropdown':
-            echo $Form->Label($LabelCode, $Row['Name']);
-            echo $Description;
-            echo $Form->CategoryDropDown($Row['Name'], $Row['Options']);
-            break;
-         case 'labelcheckbox':
-            echo $Form->Label($LabelCode);
-            echo $Form->CheckBox($Row['Name']);
-            break;
-         case 'checkbox':
-            echo $Description;
-            echo $Form->CheckBox($Row['Name'], T($LabelCode));
-            break;
-         case 'dropdown':
-            echo $Form->Label($LabelCode, $Row['Name']);
-            echo $Description;
-            echo $Form->DropDown($Row['Name'], $Row['Items'], $Row['Options']);
-            break;
-         case 'imageupload':
-            echo $Form->Label($LabelCode, $Row['Name']);
-            echo $Form->ImageUpload($Row['Name'], $Row['Options']);
-            break;
-         case 'radiolist':
-            echo $Form->Label($LabelCode, $Row['Name']);
-            echo $Description;
-            echo $Form->RadioList($Row['Name'], $Row['Items'], $Row['Options']);
-            break;
-         case 'checkboxlist':
-            echo $Form->Label($LabelCode, $Row['Name']);
-            echo $Description;
-            echo $Form->CheckBoxList($Row['Name'], $Row['Items'], NULL, $Row['Options']);
-            break;
-         case 'textbox':
-            echo $Form->Label($LabelCode, $Row['Name']);
-            echo $Description;
-            echo $Form->TextBox($Row['Name'], $Row['Options']);
-            break;
-         default:
-            echo "Error a control type of {$Row['Control']} is not supported.";
-            break;
-      }
+        if (strtolower($Row['Control']) === 'title') {
+            $title = htmlspecialchars($Row['Title']);
+            echo "<h2 class='subheading'>$title</h2>";
+            continue;
+        }
 
-      echo "\n</li>\n";
-   }
-   ?>
+        $nowrapControls = ['imageupload', 'react', 'imageuploadreact'];
+        if (!in_array(strtolower($Row['Control']), $nowrapControls)) {
+            if (val('no-grid', $Row['Options'])) {
+                echo "<li>\n  ";
+            } else {
+                echo "<li class=\"form-group\">\n  ";
+            }
+        }
+
+        $LabelCode = $Sf->labelCode($Row);
+        $Description = val('Description', $Row, '');
+        if (strtolower($Row['Control']) !== 'checkbox' && $Description) {
+            $Description = '<div class="info">'.$Description.'</div>';
+        }
+
+        switch (strtolower($Row['Control'])) {
+            case 'categorydropdown':
+                echo '<div class="label-wrap">';
+                echo $Form->label($LabelCode, $Row['Name']);
+                echo $Description;
+                echo '</div>';
+                echo '<div class="input-wrap">';
+                echo $Form->categoryDropDown($Row['Name'], $Row['Options']);
+                echo '</div>';
+                break;
+            case 'labelcheckbox':
+                echo $Form->label($LabelCode);
+                echo $Form->checkBox($Row['Name'], '', $Row['Options']);
+                break;
+            case 'checkbox':
+                echo '<div class="label-wrap">';
+                echo $Description;
+                echo '</div>';
+                echo '<div class="input-wrap">';
+                echo $Form->checkBox($Row['Name'], t($LabelCode), $Row['Options']);
+                echo '</div>';
+                break;
+            case 'toggle':
+                echo $Form->toggle($Row['Name'], t($LabelCode), $Row['Options'], $Description);
+                break;
+            case 'dropdown':
+                echo '<div class="label-wrap">';
+                echo $Form->label($LabelCode, $Row['Name']);
+                echo $Description;
+                echo '</div>';
+                echo '<div class="input-wrap">';
+                echo $Form->dropDown($Row['Name'], $Row['Items'], $Row['Options']);
+                echo '</div>';
+                break;
+            case 'imageupload':
+                $removeUrl = 'asset/deleteconfigimage/'.urlencode($Row['Name']);
+                echo $Form->imageUploadPreview($Row['Name'], $LabelCode, $Description, $removeUrl, $Row['Options']);
+                break;
+            case 'react':
+                echo $Form->react($Row['Name'], $Row['Component']);
+                break;
+            case 'imageuploadreact':
+                echo $Form->imageUploadReact(
+                    $Row['Name'],
+                    $Row['Label'] ?? '',
+                    $Row['Description'] ?? ''
+                );
+                break;
+            case 'color':
+                echo '<div class="label-wrap">';
+                echo $Form->label($LabelCode, $Row['Name']);
+                echo $Description;
+                echo '</div>';
+                echo '<div class="input-wrap">';
+                echo $Form->color($Row['Name'], $Row['Options']);
+                echo '</div>';
+                break;
+            case 'radiolist':
+                echo '<div class="label-wrap">';
+                echo $Form->label($LabelCode, $Row['Name'], ['class' => 'radiolist-label']);
+                echo $Description;
+                echo '</div>';
+                echo '<div class="input-wrap">';
+                echo $Form->radioList($Row['Name'], $Row['Items'], $Row['Options']);
+                echo '</div>';
+                break;
+            case 'checkboxlist':
+                echo $Form->label($LabelCode, $Row['Name']);
+                echo $Description;
+                echo $Form->checkBoxList($Row['Name'], $Row['Items'], null, $Row['Options']);
+                break;
+            case 'textbox':
+                echo '<div class="label-wrap">';
+                echo $Form->label($LabelCode, $Row['Name']);
+                echo $Description;
+                echo '</div>';
+                echo '<div class="input-wrap">';
+                echo $Form->textBox($Row['Name'], $Row['Options']);
+                echo '</div>';
+                break;
+            default:
+                echo "Error a control type of {$Row['Control']} is not supported.";
+                break;
+        }
+
+        echo "\n</li>\n";
+    }
+    ?>
 </ul>
-<?php echo $Form->Close('Save'); ?>
+<?php echo $Form->close('Save', '', $Sf->controller()->data('FormFooter', [])); ?>
